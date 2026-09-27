@@ -1,0 +1,31 @@
+{
+  "_说明": "复制本文件为 config.json 后修改。config.json 含密钥已被 .gitignore 排除，请勿提交。",
+  "prefer": "auto",
+  "review_source": "same",
+  "data_dir": "data",
+  "output_dir": "output",
+  "local": {
+    "base_url": "http://localhost:11434/v1",
+    "model": "qwen3:8b",
+    "api_key": "",
+    "timeout": 300,
+    "max_retries": 2
+  },
+  "api": {
+    "enabled": false,
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat",
+    "api_key": "留空则读取环境变量 COURSE_AGENT_API_KEY",
+    "timeout": 120,
+    "max_retries": 2
+  },
+  "pipeline": {
+    "chunk_chars": 3000,
+    "max_attempts": 3,
+    "min_exercises": 3,
+    "max_exercises": 6,
+    "fidelity_sample": 2,
+    "fidelity_threshold": 0.8,
+    "exemplar_min_score": 70
+  }
+}

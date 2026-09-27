@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 运行时产物与本地密钥（绝不入库）
+data/
+output/
+config.json
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db
