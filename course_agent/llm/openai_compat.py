@@ -64,6 +64,37 @@ class OpenAICompatClient(BaseLLM):
             "max_tokens": max_tokens,
             "stream": False,
         }
+        return self._request(payload)
+
+    def chat_with_image(self, system: str, user: str, images: list,
+                        temperature: float = 0.3, max_tokens: int = 2048) -> str:
+        """多图输入（OpenAI Vision 兼容格式），images 为本地图片路径列表。"""
+        import base64
+        from pathlib import Path
+
+        content: list[dict] = [{"type": "text", "text": user or "请描述这些图片。"}]
+        for img in images:
+            p = Path(img)
+            if not p.is_file():
+                raise LLMError(f"图片不存在: {p}")
+            b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+            })
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": content},
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+        return self._request(payload)
+
+    def _request(self, payload: dict) -> str:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"

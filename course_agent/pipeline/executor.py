@@ -113,12 +113,19 @@ def _generate_coding(llm: BaseLLM, course_title: str, section_title: str,
 
 
 def generate_section(llm: BaseLLM, course_title: str, psec: PlanSection,
-                     chunks: list[Chunk], pcfg, memory: Memory | None = None) -> SectionOutput:
-    """生成单个章节的完整产物。模型输出异常时带错误信息重试一次。"""
+                     chunks: list[Chunk], pcfg, memory: Memory | None = None,
+                     frame_captions: str = "") -> SectionOutput:
+    """生成单个章节的完整产物。模型输出异常时带错误信息重试一次。
+
+    frame_captions: 该时间段的屏幕演示记录（视觉模型产出），注入源文本，
+    让编程题能"看到"老师课上演示的代码。
+    """
     try:
         text = "\n\n".join(chunks[i].text for i in psec.chunk_indices)
     except IndexError as e:
         raise ExecuteError(f"章节「{psec.title}」引用了越界文本块: {e}") from e
+    if frame_captions:
+        text = text + "\n" + frame_captions
     has_ts = any(chunks[i].start_time is not None for i in psec.chunk_indices)
     start_raw = next((chunks[i].start_time for i in psec.chunk_indices
                       if chunks[i].start_time is not None), None)

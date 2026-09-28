@@ -5,5 +5,6 @@
 【分块数】{{chunk_count}}
 【总字数】{{total_chars}}
 【含时间戳】{{has_timestamps}}
+【材料完整性】{{partial_note}}
 【上轮反馈】
 {{feedback}}

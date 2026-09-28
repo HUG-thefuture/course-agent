@@ -86,7 +86,7 @@ def _normalize(plan_data: dict, pcfg: PipelineConfig) -> Plan:
 
 
 def make_plan(llm: BaseLLM, title: str, chunks: list[Chunk], feedback: str,
-              pcfg: PipelineConfig) -> Plan:
+              pcfg: PipelineConfig, partial_note: str = "材料完整。") -> Plan:
     """生成计划：内部最多重试 MAX_INTERNAL_TRIES 次，错误信息回灌。"""
     previews = "\n".join(
         f"#{c.index} (起始 {('第%d秒' % c.start_time) if c.start_time is not None else '无时间戳'}): "
@@ -105,6 +105,7 @@ def make_plan(llm: BaseLLM, title: str, chunks: list[Chunk], feedback: str,
             min_exercises=pcfg.min_exercises,
             max_exercises=pcfg.max_exercises,
             chunk_previews=previews,
+            partial_note=partial_note,
             feedback=fb,
         )
         raw = llm.chat(prompt, "请只输出计划 JSON。")

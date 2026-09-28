@@ -36,6 +36,20 @@ class ApiConfig:
 
 
 @dataclass
+class VisionConfig:
+    """视觉模型（可选）：读取视频屏幕帧，给编程题提供"屏幕上演示了什么"的证据。
+
+    未启用时视频处理退化为 纯语音转写 + 帧截图存档。
+    """
+    enabled: bool = False
+    base_url: str = DEFAULT_LOCAL_BASE_URL
+    model: str = "qwen2.5vl:7b"
+    api_key: str = ""
+    timeout: int = 300
+    max_retries: int = 1
+
+
+@dataclass
 class PipelineConfig:
     chunk_chars: int = 3000
     max_attempts: int = 3          # 思考->计划->审查->执行->测试 外层循环上限，保证必然终止
@@ -45,12 +59,16 @@ class PipelineConfig:
     fidelity_threshold: float = 0.8
     exemplar_min_score: int = 70   # 达到此分数的章节才沉淀为少样本范例
     coding_practice: bool = True   # 是否生成编程实战题（失败不影响主流程）
+    partial_chars: int = 3000      # 素材总字数低于该值按"不完整课程"处理
+    extract_frames: bool = True    # 视频素材是否提取屏幕关键帧存档
+    max_frames: int = 24           # 单课程最多提取帧数
 
 
 @dataclass
 class AgentConfig:
     local: LocalConfig = field(default_factory=LocalConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
+    vision: VisionConfig = field(default_factory=VisionConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     prefer: str = "local"          # local / api / auto(local 优先，失败回落 api)
     review_source: str = "same"    # same / api（用外部模型独立审查，更客观）
@@ -60,6 +78,10 @@ class AgentConfig:
     @property
     def api_key_effective(self) -> str:
         return self.api.api_key or os.environ.get(ENV_API_KEY, "")
+
+    @property
+    def vision_key_effective(self) -> str:
+        return self.vision.api_key or os.environ.get(ENV_API_KEY, "")
 
 
 def _merge(dc_instance: Any, patch: dict[str, Any]) -> Any:
@@ -87,6 +109,7 @@ def load_config(path: str | Path | None = None) -> AgentConfig:
             data = json.loads(Path(p).read_text(encoding="utf-8"))
             _merge(cfg.local, data.get("local", {}))
             _merge(cfg.api, data.get("api", {}))
+            _merge(cfg.vision, data.get("vision", {}))
             _merge(cfg.pipeline, data.get("pipeline", {}))
             for k in ("prefer", "review_source", "data_dir", "output_dir"):
                 if k in data:

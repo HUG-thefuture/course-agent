@@ -85,6 +85,40 @@ python main.py run --input "https://ylz.cos.meeting.tencent.com/cos/.../xxx_scre
 > 无法自动化获取时，`fetch`/`run` 会打印以上分步引导。下载与整理仅限你合法
 > 拥有访问权限的课程回放，请遵守分享者设置的权限。
 
+## 四、批量处理与视频课程
+
+**批量识别课程**（`batch` 命令）——目录、清单、链接混着来都行：
+
+```bash
+# 整个目录（音视频/字幕/文稿自动识别）
+python main.py batch --input D:/课程录屏
+
+# 清单文件（courses.list：每行 链接|提取码|标题，或 路径|标题）
+# 或 courses.json：[{"source": "...", "password": "...", "title": "..."}]
+python main.py batch --input courses.list
+
+# 多个来源混合
+python main.py batch --input D:/录屏 courses.json "https://meeting.tencent.com/crm/xxx"
+
+# 断点续跑：已完成的自动跳过，中断后重跑同一命令即可接着干（--force 全部重跑）
+```
+
+逐个课程独立处理：**单个失败不中断整批**，产物分目录存放，`batch_report.json`
+汇总每课状态与得分。同一视频只转写一次（缓存），二跑秒级完成。
+全批共享记忆库，前面的课程范例会让后面的整理更稳。
+
+**视频课程通道**（mp4/录屏直接喂）：
+
+- 语音 → faster-whisper 本地转写（已验证）；
+- 画面 → ffmpeg 场景检测提取关键帧，存档在产物 `frames/` 目录，做题时对照回看；
+- **可选视觉模型**：`config.json` 里启用 `vision`（如本地 `ollama pull qwen2.5vl:7b`
+  或云端 qwen-vl），帧会被模型"看"一遍，屏幕上演示的代码/命令生成文字记录，
+  注入对应章节——**编程题因此能覆盖老师只演示没讲透的代码**。未启用时自动降级。
+
+**不完整课程**：材料过短（低于 `pipeline.partial_chars`，默认 3000 字）自动按
+"片段/节选"处理——提示计划阶段按现有内容组织、不假设缺失部分，短录屏、半节课
+素材都能正常出产物（已用 96 秒短视频端到端验证）。
+
 ## 四、核心工作流（与你要求的流程一一对应）
 
 ```
@@ -124,6 +158,14 @@ python main.py run --input "https://ylz.cos.meeting.tencent.com/cos/.../xxx_scre
     "base_url": "https://api.deepseek.com/v1",
     "model": "deepseek-chat",
     "api_key": ""              // 推荐留空，用环境变量 COURSE_AGENT_API_KEY 传入
+  },
+  "vision": {                  // 可选：读视频屏幕帧（编程题证据增强）
+    "enabled": false,
+    "base_url": "http://localhost:11434/v1",
+    "model": "qwen2.5vl:7b"    // ollama pull qwen2.5vl:7b 后即可启用
+  },
+  "pipeline": {
+    "partial_chars": 3000      // 低于此字数按"不完整课程"处理
   }
 }
 ```

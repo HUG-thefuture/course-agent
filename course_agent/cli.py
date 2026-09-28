@@ -2,6 +2,7 @@
 
 子命令：
   run         处理一份课程材料（文件/URL/腾讯会议回放），产出知识点笔记/关键节点/习题
+  batch       批量处理：目录/清单/多个链接，逐个转写+整理，断点续跑
   fetch       只做 下载回放 -> 本地转写（srt/txt），先验证素材可用再整理
   demo        离线演示（内置 Mock 模型 + 示例字幕，无需配置模型）
   improve     在样例材料上运行自改进循环（生成->质检->沉淀范例）
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import __version__
+from .batch import discover_items, run_batch
 from .config import (AgentConfig, check_connectivity, load_config,
                      masked_config)
 from .ingest.hls import DownloadError
@@ -84,6 +86,17 @@ def _resolve_review_llm(cfg: AgentConfig, llm, mock: bool):
         max_retries=cfg.api.max_retries)
 
 
+def _build_vision_llm(cfg: AgentConfig, mock: bool):
+    """视觉模型：仅当配置启用且非 Mock 模式时返回；不可用一律降级为 None。"""
+    if mock or not cfg.vision.enabled:
+        return None
+    _log.info("视觉通道已启用: %s", cfg.vision.model)
+    return OpenAICompatClient(
+        base_url=cfg.vision.base_url, model=cfg.vision.model,
+        api_key=cfg.vision_key_effective, timeout=cfg.vision.timeout,
+        max_retries=cfg.vision.max_retries)
+
+
 # ------------------------------------------------------------------ commands
 def cmd_run(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
@@ -94,12 +107,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     setup_logging(args.verbose)
     llm = build_llm(cfg, mock=args.mock, source=args.source, model_override=args.model)
     review_llm = _resolve_review_llm(cfg, llm, args.mock)
+    vision_llm = _build_vision_llm(cfg, args.mock)
     material = load_source(args.input, password=args.password or "",
                            workdir=cfg.data_dir)
     title = args.title or material.title
     mem = _open_memory(cfg, enabled=not args.no_memory)
     try:
-        orch = Orchestrator(llm, cfg, review_llm=review_llm, memory=mem)
+        orch = Orchestrator(llm, cfg, review_llm=review_llm, memory=mem,
+                            vision_llm=vision_llm)
         result = orch.run(material, title=title)
         outdir = args.outdir or str(Path(cfg.output_dir) / result.session_id)
         files = write_all(result, outdir)
@@ -172,6 +187,38 @@ def cmd_export_sft(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_batch(args: argparse.Namespace) -> int:
+    """批量处理：目录 / 清单（txt|json）/ 多个链接，逐个转写+整理。"""
+    cfg = load_config(args.config)
+    setup_logging(args.verbose)
+    llm = build_llm(cfg, mock=args.mock, source=args.source)
+    review_llm = _resolve_review_llm(cfg, llm, args.mock)
+    vision_llm = _build_vision_llm(cfg, args.mock)
+    items = discover_items(args.input)
+    if not items:
+        _log.error("没有发现可处理的课程素材（支持目录/清单.txt/清单.json/URL）")
+        return 1
+    _log.info("批量计划：%d 个课程素材", len(items))
+    mem = _open_memory(cfg)
+    try:
+        outcomes = run_batch(llm, cfg, items,
+                             out_root=args.outdir or str(Path(cfg.output_dir) / "batch"),
+                             memory=mem, vision_llm=vision_llm,
+                             force=args.force, review_llm=review_llm)
+    finally:
+        if mem is not None:
+            mem.close()
+    failed = [o for o in outcomes if o.status == "failed"]
+    qa_failed = [o for o in outcomes if o.status == "qa_failed"]
+    for o in outcomes:
+        mark = {"passed": "✓", "qa_failed": "△", "failed": "✗", "skipped": "-"}.get(o.status, "?")
+        print(f"  [{mark}] {o.title}  {o.status}  score={o.score}  {o.output_dir}"
+              + (f"  error={o.error}" if o.error else ""))
+    if failed:
+        return 1
+    return 0 if not qa_failed else 2
+
+
 def cmd_fetch(args: argparse.Namespace) -> int:
     """只做 下载回放 -> 本地转写（srt/txt），不跑整理管线。便于先验证素材可用。"""
     import re as _re
@@ -237,6 +284,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--no-memory", action="store_true", help="不读写记忆库")
     common(run)
 
+    batch = sub.add_parser("batch", help="批量处理课程（目录/清单/多个链接）")
+    batch.add_argument("--input", nargs="+", required=True,
+                       help="目录 / 清单文件(.txt 行格式: 链接|提取码|标题 / .json) / URL / 文件，可混合多个")
+    batch.add_argument("--outdir", default="", help="输出根目录（默认 output/batch）")
+    batch.add_argument("--mock", action="store_true", help="使用离线 Mock 模型")
+    batch.add_argument("--force", action="store_true", help="忽略已有产物强制重跑")
+    batch.add_argument("--source", choices=["auto", "local", "api"], default="auto")
+    common(batch)
+
     demo = sub.add_parser("demo", help="离线演示")
     demo.add_argument("--outdir", default="", help="输出目录")
     common(demo)
@@ -276,9 +332,10 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     args = parser.parse_args(argv)
-    handlers = {"run": cmd_run, "demo": cmd_demo, "improve": cmd_improve,
-                "rate": cmd_rate, "export-sft": cmd_export_sft,
-                "fetch": cmd_fetch, "config": cmd_config}
+    handlers = {"run": cmd_run, "batch": cmd_batch, "demo": cmd_demo,
+                "improve": cmd_improve, "rate": cmd_rate,
+                "export-sft": cmd_export_sft, "fetch": cmd_fetch,
+                "config": cmd_config}
     try:
         return handlers[args.command](args)
     except (LLMError, ValueError, FileNotFoundError, IngestError,

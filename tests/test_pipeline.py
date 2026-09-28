@@ -225,6 +225,22 @@ class TestOrchestrator(unittest.TestCase):
             self.assertFalse(any(e.type == "coding_practice" for e in sec.exercises))
             self.assertGreaterEqual(len(sec.exercises), 2)
 
+    def test_partial_course_detected(self):
+        # 材料字数低于 partial_chars → 按不完整课程处理
+        cfg = AgentConfig()
+        cfg.pipeline.partial_chars = 100000
+        material = load_source(str(EXAMPLE_TXT))
+        result = Orchestrator(MockLLM(), cfg).run(material, title="片段")
+        self.assertTrue(result.partial)
+        self.assertTrue(result.passed)
+
+    def test_full_course_not_partial(self):
+        cfg = AgentConfig()
+        cfg.pipeline.partial_chars = 10
+        material = load_source(str(EXAMPLE_TXT))
+        result = Orchestrator(MockLLM(), cfg).run(material, title="完整")
+        self.assertFalse(result.partial)
+
     def test_write_outputs(self):
         result = self._run(MockLLM())
         with tempfile.TemporaryDirectory() as td:

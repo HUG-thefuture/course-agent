@@ -130,6 +130,8 @@ def _report_md(result: SessionResult) -> str:
 
 def write_all(result: SessionResult, outdir: str | Path) -> dict[str, str]:
     """写出全部产物，返回文件名 -> 路径。目录不存在则创建。"""
+    import shutil
+
     d = Path(outdir)
     d.mkdir(parents=True, exist_ok=True)
     files: dict[str, str] = {}
@@ -138,6 +140,16 @@ def write_all(result: SessionResult, outdir: str | Path) -> dict[str, str]:
         p = d / name
         _w(p, text)
         files[name] = str(p)
+
+    # 视频关键帧存档（若有），供做题时对照回看
+    if result.frames:
+        frames_dir = d / "frames"
+        frames_dir.mkdir(exist_ok=True)
+        for f in result.frames:
+            src = Path(f.path)
+            if src.is_file():
+                shutil.copy2(src, frames_dir / src.name)
+        files["frames/"] = str(frames_dir)
 
     put("notes.md", _notes_md(result))
     put("key_nodes.md", _key_nodes_md(result))

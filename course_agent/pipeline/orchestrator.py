@@ -29,11 +29,46 @@ _log = logging.getLogger(__name__)
 class Orchestrator:
     def __init__(self, llm: BaseLLM, cfg: AgentConfig,
                  review_llm: BaseLLM | None = None,
-                 memory: Memory | None = None) -> None:
+                 memory: Memory | None = None,
+                 vision_llm: BaseLLM | None = None) -> None:
         self.llm = llm
         self.review_llm = review_llm or llm
         self.cfg = cfg
         self.memory = memory
+        self.vision_llm = vision_llm
+
+    def _extract_frames(self, session_id: str, material: Material) -> list:
+        """视频素材提取关键帧；视觉模型可用时生成屏幕演示描述。失败只降级。"""
+        from pathlib import Path
+        try:
+            from ..ingest.frames import extract_keyframes
+            out_dir = Path(self.cfg.data_dir) / "frames" / session_id
+            frames = extract_keyframes(material.source, out_dir,
+                                       max_frames=self.cfg.pipeline.max_frames)
+        except Exception as e:
+            _log.warning("关键帧提取失败（视觉通道跳过）: %s", e)
+            return []
+        if self.vision_llm is not None:
+            from ..llm.vision import describe_frames
+            frames = describe_frames(self.vision_llm, frames)
+            n = sum(1 for f in frames if f.caption)
+            _log.info("屏幕演示描述完成：%d/%d 帧", n, len(frames))
+        return frames
+
+    def _captions_for_section(self, frames: list, sections: list, idx: int,
+                              chunks) -> str:
+        """取该章节时间范围内的屏幕演示记录文本。"""
+        if not frames:
+            return ""
+        from ..llm.vision import captions_for_range
+        sec = sections[idx]
+        start = next((chunks[i].start_time for i in sec.chunk_indices
+                      if chunks[i].start_time is not None), None)
+        end = None
+        if idx + 1 < len(sections):
+            end = next((chunks[i].start_time for i in sections[idx + 1].chunk_indices
+                        if chunks[i].start_time is not None), None)
+        return captions_for_range(frames, start, end)
 
     def run(self, material: Material, title: str | None = None) -> SessionResult:
         from ..ingest.loader import chunk_material
@@ -41,8 +76,18 @@ class Orchestrator:
         course_title = (title or material.title or "课程").strip()
         chunks = chunk_material(material, pcfg.chunk_chars)
         session_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{slugify(course_title)[:24]}"
-        _log.info("素材「%s」共 %d 字，分为 %d 块", course_title,
-                  material.total_chars, len(chunks))
+        partial = material.total_chars < pcfg.partial_chars
+        partial_note = (
+            "材料可能只是完整课程的一部分（片段/节选），请按现有内容组织，"
+            "不要假设或编造未包含的部分。" if partial else "材料完整。")
+        _log.info("素材「%s」共 %d 字，分为 %d 块%s", course_title,
+                  material.total_chars, len(chunks),
+                  "（按不完整课程处理）" if partial else "")
+
+        # ---- 视频素材：提取屏幕关键帧，视觉模型可用时生成屏幕演示记录 ----
+        frames: list = []
+        if "video" in material.kind and pcfg.extract_frames:
+            frames = self._extract_frames(session_id, material)
 
         feedback = ""
         attempts: list[AttemptRecord] = []
@@ -61,6 +106,7 @@ class Orchestrator:
                     "think", title=course_title, chunk_count=len(chunks),
                     total_chars=material.total_chars,
                     has_timestamps="true" if material.has_timestamps else "false",
+                    partial_note=partial_note,
                     feedback=feedback or "（首轮，无）",
                 ),
                 "请开始分析。",
@@ -69,7 +115,8 @@ class Orchestrator:
 
             # ---- 计划 ----
             try:
-                plan = make_plan(self.llm, course_title, chunks, feedback, pcfg)
+                plan = make_plan(self.llm, course_title, chunks, feedback, pcfg,
+                                 partial_note=partial_note)
             except PlanError as e:
                 rec.review_issues = [str(e)]
                 attempts.append(rec)
@@ -95,10 +142,13 @@ class Orchestrator:
             # ---- 执行 ----
             sections = []
             try:
-                for psec in plan.sections:
+                for si, psec in enumerate(plan.sections):
                     _log.info("生成章节：%s", psec.title)
+                    caps = self._captions_for_section(
+                        frames, plan.sections, si, chunks)
                     sections.append(generate_section(
-                        self.llm, course_title, psec, chunks, pcfg, self.memory))
+                        self.llm, course_title, psec, chunks, pcfg, self.memory,
+                        frame_captions=caps))
             except ExecuteError as e:
                 rec.qa_issues = [str(e)]
                 attempts.append(rec)
@@ -119,12 +169,11 @@ class Orchestrator:
             _log.warning("测试未通过（得分 %d），返回思考阶段重试", qa.score)
 
         passed = bool(qa and qa.passed)
-        result = SessionResult(session_id=session_id, title=course_title,
-                               source=material.source, plan=plan or _empty_plan(course_title),
-                               sections=sections, qa=qa, attempts=attempts,
-                               passed=passed)
-
-        # ---- 通过则沉淀高质量范例，供后续少样本自改进 ----
+        result = SessionResult(
+            session_id=session_id, title=course_title,
+            source=material.source, plan=plan or _empty_plan(course_title),
+            sections=sections, qa=qa, attempts=attempts,
+            passed=passed, frames=frames, partial=partial)
         if passed and self.memory is not None and qa.score >= pcfg.exemplar_min_score:
             for sec in sections:
                 self.memory.add_example(

@@ -175,6 +175,15 @@ class MockLLM(BaseLLM):
         ]
         return json.dumps({"exercises": exercises}, ensure_ascii=False)
 
+    def chat_with_image(self, system: str, user: str, images: list,
+                        temperature: float = 0.3, max_tokens: int = 2048) -> str:
+        """视觉接口的 Mock：按图片数量返回通用描述。"""
+        n = len(images or [])
+        rows = [{"idx": i,
+                 "caption": f"屏幕演示{i + 1}：代码编辑器中展示组件实现，含函数定义与终端命令"}
+                for i in range(n)]
+        return json.dumps({"frames": rows}, ensure_ascii=False)
+
     def _coding(self, user: str) -> str:
         if self.fail_coding > 0:
             self.fail_coding -= 1

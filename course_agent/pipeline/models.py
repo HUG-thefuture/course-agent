@@ -141,6 +141,15 @@ class QAReport:
 
 
 @dataclass
+class Frame:
+    """视频关键帧：截图路径 + 对应时间（秒）+ 可选视觉描述。"""
+
+    path: str
+    time: float
+    caption: str = ""
+
+
+@dataclass
 class AttemptRecord:
     index: int
     review_passed: bool = False
@@ -160,6 +169,8 @@ class SessionResult:
     attempts: list[AttemptRecord] = field(default_factory=list)
     passed: bool = False
     output_dir: str = ""
+    frames: list[Frame] = field(default_factory=list)
+    partial: bool = False   # 素材是否按"不完整课程"处理
 
     def to_summary(self) -> dict[str, Any]:
         return {
@@ -172,4 +183,6 @@ class SessionResult:
             "exercises": sum(len(s.exercises) for s in self.sections),
             "attempts": len(self.attempts),
             "output_dir": self.output_dir,
+            "partial": self.partial,
+            "frames": len(self.frames),
         }
