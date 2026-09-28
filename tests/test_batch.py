@@ -20,11 +20,15 @@ class TestDiscover(unittest.TestCase):
             (d / "第1课.txt").write_text("内容", encoding="utf-8")
             (d / "第2课.srt").write_text("1\n00:00:01,000 --> 00:00:02,000\nhi\n",
                                          encoding="utf-8")
+            (d / "第3课转写.json").write_text(
+                json.dumps([{"start": 0.0, "text": "转写内容"}], ensure_ascii=False),
+                encoding="utf-8")
+            (d / "harvest_report.json").write_text("{}", encoding="utf-8")
             (d / "忽略.xyz").write_text("x", encoding="utf-8")
             (d / ".hidden.txt").write_text("x", encoding="utf-8")
             items = discover_items([str(d)])
-            self.assertEqual(len(items), 2)
-            self.assertEqual(items[0].title, "第1课")
+            self.assertEqual(len(items), 3)  # txt/srt/转写json，报告与隐藏文件排除
+            self.assertEqual(items[2].title, "第3课转写")
 
     def test_text_manifest(self):
         with tempfile.TemporaryDirectory() as td:

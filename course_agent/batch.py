@@ -32,7 +32,7 @@ _log = logging.getLogger(__name__)
 
 _MANIFEST_EXTS = {".json", ".list"}   # 清单文件专用扩展名（.txt/.md 单文件视为课程文稿）
 _SUBTITLE_EXTS = {".srt", ".vtt"}
-_TRANSCRIPT_EXTS = {".txt", ".md", ".markdown"}
+_TRANSCRIPT_EXTS = {".txt", ".md", ".markdown", ".json"}  # .json = 转写稿（loader json 格式）
 _MEDIA_EXTS = AUDIO_EXTS | VIDEO_EXTS
 _SCAN_EXTS = _MEDIA_EXTS | _SUBTITLE_EXTS | _TRANSCRIPT_EXTS
 
