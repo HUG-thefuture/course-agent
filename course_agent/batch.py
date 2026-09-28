@@ -67,7 +67,7 @@ def discover_items(inputs: list[str]) -> list[BatchItem]:
             found = [f for f in sorted(p.iterdir())
                      if f.is_file() and f.suffix.lower() in _SCAN_EXTS
                      and not f.name.startswith(".")
-                     and not f.name.startswith("batch_report")]
+                     and not f.name.startswith(("batch_report", "harvest_report"))]
             for f in found:
                 items.append(BatchItem(source=str(f), title=f.stem))
             if not found:
