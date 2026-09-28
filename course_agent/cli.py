@@ -1,7 +1,8 @@
 """命令行入口。
 
 子命令：
-  run         处理一份课程材料（文件/URL），产出知识点笔记/关键节点/习题
+  run         处理一份课程材料（文件/URL/腾讯会议回放），产出知识点笔记/关键节点/习题
+  fetch       只做 下载回放 -> 本地转写（srt/txt），先验证素材可用再整理
   demo        离线演示（内置 Mock 模型 + 示例字幕，无需配置模型）
   improve     在样例材料上运行自改进循环（生成->质检->沉淀范例）
   rate        对某次会话的章节打分，反馈进入记忆库
@@ -21,9 +22,11 @@ from typing import Optional
 from . import __version__
 from .config import (AgentConfig, check_connectivity, load_config,
                      masked_config)
+from .ingest.hls import DownloadError
 from .improve import export_sft, run_improvement
-from .ingest.loader import IngestError, load_source
-from .ingest.transcriber import TranscribeError
+from .ingest.loader import (AUDIO_EXTS, IngestError, VIDEO_EXTS,
+                            classify_url, load_source, resolve_media_url)
+from .ingest.transcriber import TranscribeError, segments_to_srt, transcribe_media
 from .llm import LLMError, MockLLM, OpenAICompatClient, Router
 from .memory import Memory
 from .outputs import write_all
@@ -31,7 +34,7 @@ from .pipeline.executor import ExecuteError
 from .pipeline.planner import PlanError
 from .pipeline.orchestrator import Orchestrator
 from .prompts import PromptError
-from .utils import setup_logging
+from .utils import safe_read_text, setup_logging
 
 _log = logging.getLogger("course_agent")
 
@@ -91,7 +94,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     setup_logging(args.verbose)
     llm = build_llm(cfg, mock=args.mock, source=args.source, model_override=args.model)
     review_llm = _resolve_review_llm(cfg, llm, args.mock)
-    material = load_source(args.input, password=args.password or "")
+    material = load_source(args.input, password=args.password or "",
+                           workdir=cfg.data_dir)
     title = args.title or material.title
     mem = _open_memory(cfg, enabled=not args.no_memory)
     try:
@@ -168,6 +172,36 @@ def cmd_export_sft(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fetch(args: argparse.Namespace) -> int:
+    """只做 下载回放 -> 本地转写（srt/txt），不跑整理管线。便于先验证素材可用。"""
+    import re as _re
+    cfg = load_config(args.config)
+    setup_logging(args.verbose)
+    src = args.input
+    if _re.match(r"^https?://", src):
+        if classify_url(src) not in ("tencent_share", "media"):
+            raise IngestError("fetch 仅支持 腾讯会议回放链接 / m3u8、mp4 媒体链接；普通网页请直接用 run")
+        local = resolve_media_url(src, password=args.password or "",
+                                  workdir=cfg.data_dir)
+    else:
+        p = Path(src)
+        if not (p.is_file() and p.suffix.lower() in (AUDIO_EXTS | VIDEO_EXTS)):
+            raise IngestError("fetch 仅用于 腾讯会议回放链接 / 视频(m3u8/mp4)链接 / 本地音视频文件")
+        local = p
+    segments = transcribe_media(local)
+    title = args.title or local.stem
+    outdir = Path(args.outdir or (Path(cfg.data_dir) / "transcripts"))
+    outdir.mkdir(parents=True, exist_ok=True)
+    srt_path = outdir / f"{title}.srt"
+    txt_path = outdir / f"{title}.txt"
+    srt_path.write_text(segments_to_srt(segments), encoding="utf-8")
+    txt_path.write_text("\n".join(seg.text for seg in segments), encoding="utf-8")
+    print(f"  {srt_path}")
+    print(f"  {txt_path}")
+    _log.info("接下来可运行: python main.py run --input \"%s\" --title \"%s\"", srt_path, title)
+    return 0
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     setup_logging(args.verbose)
     cfg = load_config(args.config)
@@ -226,6 +260,13 @@ def build_parser() -> argparse.ArgumentParser:
     exp.add_argument("--out", default="data/sft.jsonl")
     common(exp)
 
+    fetch = sub.add_parser("fetch", help="下载回放并转写为字幕/文稿（不整理）")
+    fetch.add_argument("--input", required=True, help="腾讯会议回放链接 / m3u8/mp4 URL / 本地音视频")
+    fetch.add_argument("--password", default="", help="提取码")
+    fetch.add_argument("--title", default="", help="输出文件名（默认取链接/文件名）")
+    fetch.add_argument("--outdir", default="", help="输出目录（默认 data/transcripts）")
+    common(fetch)
+
     conf = sub.add_parser("config", help="查看配置与连通性")
     common(conf)
     return p
@@ -237,11 +278,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     handlers = {"run": cmd_run, "demo": cmd_demo, "improve": cmd_improve,
                 "rate": cmd_rate, "export-sft": cmd_export_sft,
-                "config": cmd_config}
+                "fetch": cmd_fetch, "config": cmd_config}
     try:
         return handlers[args.command](args)
     except (LLMError, ValueError, FileNotFoundError, IngestError,
-            TranscribeError, PlanError, ExecuteError, PromptError) as e:
+            TranscribeError, PlanError, ExecuteError, PromptError,
+            DownloadError) as e:
         _log.error("%s", e)
         return 1
     except KeyboardInterrupt:

@@ -43,17 +43,41 @@ python main.py run --input https://课程回放页 --password 页面密码
 | `.srt` / `.vtt` | 直播课字幕（推荐，能生成时间戳，可定位回放） |
 | `.txt` / `.md` | 课程文稿、笔记 |
 | `.json` | `[{"start": 秒, "text": "..."}]` 格式的转写结果 |
-| 音视频 `.mp3/.mp4/…` | 需 `pip install faster-whisper`，本地转写后自动整理 |
+| 音视频 `.mp3/.mp4/…` | 本地转写（faster-whisper，已验证可用） |
 | PDF 讲义 | 需 `pip install pypdf` |
 | 网页 URL | 直接抓取正文；`--password` 会以查询参数/表单惯例传入 |
+| 视频/回放流 URL | m3u8 / mp4 直链，自动下载（优先 ffmpeg）→ 转写 → 整理 |
 
-> **关于直播平台的诚实说明**：各直播/网课平台（腾讯会议、钉钉、某课堂等）的加密与
-> 回放机制互不相同，本项目不针对特定平台做逆向破解。通用做法是：把平台导出的
-> 字幕/转写/文稿保存为上述格式再输入；对带密码的普通网页，`--password` 走通用
-> 约定（`?password=` 或 Basic Auth）。需要接特定平台时，在 `ingest/` 下加一个
-> 适配函数即可，管线其余部分不用改。
+## 三、腾讯会议课程怎么用
 
-## 三、核心工作流（与你要求的流程一一对应）
+腾讯会议直播中的实时字幕没有对学员开放的程序接口，**课后**素材走以下三条路（按推荐顺序）：
+
+**路径 A（最简单）：回放页直接下载**
+若老师分享回放时勾选了「允许下载」，在回放页直接下载 mp4，然后：
+```bash
+python main.py run --input 录制.mp4 --title "课程名"
+```
+
+**路径 B（全自动）：回放分享链接 + 提取码**
+```bash
+python main.py fetch --input "https://meeting.tencent.com/v2/cloud-record/share.html?record_id=xxx" --password 提取码
+```
+`fetch` 会尝试自动从分享页提取视频流并下载转写为 srt/txt。由于回放页是 JS 渲染、
+播放流带时效 token，自动提取不一定成功——失败时助手会打印**分步引导**：浏览器 F12 →
+Network → 筛选 `m3u8` → 复制流地址，然后：
+```bash
+python main.py run --input "https://.../xxx.m3u8?token=..." --title "课程名"
+# 或只下载转写不整理：
+python main.py fetch --input "https://.../xxx.m3u8?token=..."
+```
+下载优先调用本机 ffmpeg（已检测到你装有 8.1.2）；无 ffmpeg 时自动退回纯标准库 HLS 下载。
+
+**路径 C（最轻量）：会议转写文稿**
+老师若导出了「会议转写」（商业版功能），拿到 txt 直接 `run --input 文稿.txt`。
+
+> 下载与整理仅限你合法拥有访问权限的课程回放，请遵守分享者设置的权限。
+
+## 四、核心工作流（与你要求的流程一一对应）
 
 ```
 素材加载 ──> ① 思考 ──> ② 出具计划(章节划分JSON)
@@ -75,7 +99,7 @@ python main.py run --input https://课程回放页 --password 页面密码
 - 审查与测试都采用"代码确定性校验优先，模型判断为辅"的双保险设计
 - `config.json` 里 `max_attempts` 可调轮数，`review_source: "api"` 可让外部模型独立审查本地模型的产出，更客观
 
-## 四、配置
+## 五、配置
 
 复制 `config.example.json` 为 `config.json`（该文件含密钥已被 `.gitignore` 排除）：
 
@@ -98,7 +122,7 @@ python main.py run --input https://课程回放页 --password 页面密码
 
 API 密钥**只**从 `config.json`（不入库）或环境变量 `COURSE_AGENT_API_KEY` 读取，永远不会出现在代码与提交记录中。
 
-## 五、"训练"：助手如何越用越好
+## 六、“训练”：助手如何越用越好
 
 本项目不做烧卡的权重微调，而是两条实证有效的路径（`improve.py`）：
 
@@ -114,17 +138,17 @@ python main.py rate --session <会话ID> --section <章节名> --score 4 --note 
 python main.py export-sft --out data/sft.jsonl
 ```
 
-## 六、测试
+## 七、测试
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-83 个用例覆盖：JSON 容错提取、字幕/HTML 解析、分块完整性、HTTP 重试与回落、
+106 个用例覆盖：JSON 容错提取、字幕/HTML 解析、分块完整性、HTTP 重试与回落、
 计划/审查/测试各阶段校验、编排循环的失败恢复与终止保证、记忆库容量治理、CLI 端到端。
 全部离线运行（Mock 模型），无需网络与本地模型。
 
-## 七、工程保障（无逻辑错误 / 无内存泄漏）
+## 八、工程保障（无逻辑错误 / 无内存泄漏）
 
 - **循环必然终止**：外层 `max_attempts` 上限 + 内部重试上限，失败路径全部有出口
 - **资源零堆积**：HTTP 用 `urllib` 每请求独立连接（用完即关）；文件全部 `with` 托管；
@@ -133,7 +157,7 @@ python -m unittest discover -s tests -v
 - **输入容错**：GBK/UTF-8 自动识别、残缺 HTML 容忍解析、模型输出围栏/思考段/杂文均能提取
 - **异常有边界**：CLI 层统一捕获业务异常返回非零退出码，方便脚本化调用
 
-## 八、目录结构
+## 九、目录结构
 
 ```
 course-agent/
@@ -154,7 +178,7 @@ course-agent/
 └── tests/                   # 83 个离线单元测试
 ```
 
-## 九、已知边界
+## 十、已知边界
 
 - 实时直播中的**同步**字幕抓取因平台而异，本工具面向**课后材料**（录屏、字幕、文稿）整理
 - 音视频转写首次使用需下载 whisper 模型权重（约 500MB，CPU 可跑）

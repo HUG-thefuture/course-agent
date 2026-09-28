@@ -56,7 +56,32 @@ ingest(加载/分块) → pipeline{think→plan→review→execute→test} → o
   质检得分 100、忠实度 100%，知识点/习题内容与原文核对无编造
 - **真实模型自改进**：`improve` 命令在字幕样例上跑通，范例成功沉淀进记忆库
 
-## 6. 遗留与后续
+## 6. 迭代二：腾讯会议适配（2026-09-28）
+
+用户反馈课程通过腾讯会议进行，重新走了一遍 思考→计划→审查→测试：
+
+**思考**：调研确认（[官方帮助中心](https://meeting.tencent.com/support/topic/2070/index.html)、
+[CSDN 抓流原理](https://blog.csdn.net/2501_93364350/article/details/161460745)）：
+回放分享链接形如 `share.html?record_id=xxx&access_code=xxx`，页面 JS 渲染，播放流是
+带时效 token 的 HLS（m3u8）；直播中实时字幕无学员侧程序接口。
+
+**计划**：三条接入路径（回放页官方下载 mp4 / 分享链接+提取码全自动+引导抓流兜底 /
+转写文稿）；下载优先 ffmpeg（检测到本机 8.1.2），无 ffmpeg 走纯标准库 HLS
+（滑动窗口并发，AES-128 需 pycryptodome）；转写用 faster-whisper（已安装并预取
+small 模型，HF 默认走国内镜像）。
+
+**审查发现并修复**：
+- `_hls_python_download` 中残留的全局 `from Crypto import` 会让无加密流也强依赖
+  pycryptodome —— 移除，改为仅在检测到加密时才要求；
+- `cmd_fetch` 对本地 Windows 路径误调用 `classify_url`，`C:\...mp4` 被 urlparse
+  误判为媒体 URL 触发 ffmpeg —— 先判 `^https?://` 再分类；
+- 下载函数不创建父目录、cli 的 `DownloadError` 导入路径错误 —— 均修复。
+
+**测试**：106 个用例全绿（新增 23 个：HLS 解析/主清单选择/加密识别/本地 HTTP
+服务器端到端下载/分享页扫描/提取码合并/引导话术/fetch 命令）。
+用假 record_id 实测引导路径：腾讯服务器返回 404 后优雅降级为分步指引。
+
+## 7. 遗留与后续
 
 - 平台专用适配器（腾讯会议/钉钉等导出格式的自动识别）
 - 忠实度全量校验模式（代价是调用量翻倍）

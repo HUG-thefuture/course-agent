@@ -1,27 +1,61 @@
-"""素材加载器：把 文件/字幕/网页/音视频 统一为 Material，并分块。"""
+"""素材加载器：把 文件/字幕/网页/回放链接/音视频 统一为 Material，并分块。"""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 from ..pipeline.models import Chunk, Material, Segment
 from ..utils import safe_read_text
-from . import parsers
+from . import parsers, tencent as tencent_mod
+from .hls import download_stream
 from .transcriber import transcribe_media
 
 _log = logging.getLogger(__name__)
 
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma"}
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".ts"}
+MEDIA_URL_EXTS = (".m3u8", ".mp4", ".mkv", ".flv", ".ts", ".mov", ".webm",
+                  ".mp3", ".m4a", ".aac", ".wav")
 
 
 class IngestError(Exception):
     """素材加载失败。"""
+
+
+def classify_url(url: str) -> str:
+    """URL 分类：tencent_share / media / page。纯函数，便于测试。"""
+    low = (url or "").lower()
+    if tencent_mod.is_tencent_share(low):
+        return "tencent_share"
+    if ".m3u8" in low:
+        return "media"
+    path = urllib.parse.urlparse(low).path
+    if path.endswith(MEDIA_URL_EXTS):
+        return "media"
+    return "page"
+
+
+def resolve_media_url(url: str, password: str = "", workdir: str | Path = "data") -> Path:
+    """把回放/媒体 URL 落地为本地视频文件（带缓存，重复运行不重复下载）。"""
+    if classify_url(url) == "tencent_share":
+        video = tencent_mod.try_extract_video_url(url, password)
+        if not video:
+            raise IngestError(tencent_mod.guided_steps(url))
+        _log.info("已从分享页自动提取到媒体地址")
+        url = video
+    name = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+    out = Path(workdir) / "downloads" / f"{name}.mp4"
+    try:
+        return download_stream(url, out)
+    except Exception as e:
+        if isinstance(e, IngestError):
+            raise
+        raise IngestError(str(e)) from e
 
 
 def fetch_url(url: str, password: str = "", timeout: int = 30) -> tuple[str, str]:
@@ -29,7 +63,7 @@ def fetch_url(url: str, password: str = "", timeout: int = 30) -> tuple[str, str
 
     password 处理说明：多数课程平台加密方式各不相同，这里提供最通用的两种——
     追加 ?password= 查询参数，或 HTTP Basic 认证（url 形如 https://user:pass@host）。
-    平台特有逻辑请通过自定义适配脚本预处理后走文件输入。
+    腾讯会议回放走 classify_url -> resolve_media_url 专用路径，不经过本函数。
     """
     if not re.match(r"^https?://", url):
         raise IngestError(f"不支持的 URL: {url}")
@@ -51,9 +85,18 @@ def fetch_url(url: str, password: str = "", timeout: int = 30) -> tuple[str, str
     return title or url, text
 
 
-def load_source(path_or_url: str, password: str = "") -> Material:
+def load_source(path_or_url: str, password: str = "",
+                workdir: str | Path = "data") -> Material:
     """统一入口：文件路径或 http(s) URL -> Material。"""
     if re.match(r"^https?://", path_or_url):
+        kind = classify_url(path_or_url)
+        if kind in ("tencent_share", "media"):
+            local = resolve_media_url(path_or_url, password=password, workdir=workdir)
+            segments = transcribe_media(local)
+            if not segments:
+                raise IngestError(f"视频转写结果为空: {local}")
+            return Material(title=Path(path_or_url).stem[:40] or "回放课程",
+                            kind="video", source=path_or_url, segments=segments)
         title, text = fetch_url(path_or_url, password=password)
         return Material(title=title, kind="url", source=path_or_url,
                         segments=parsers.plain_to_segments(text))
@@ -89,6 +132,8 @@ def load_source(path_or_url: str, password: str = "") -> Material:
                         segments=parsers.plain_to_segments(text))
     if ext in AUDIO_EXTS or ext in VIDEO_EXTS:
         segs = transcribe_media(p)
+        if not segs:
+            raise IngestError(f"音视频转写结果为空: {p}")
         return Material(title=p.stem, kind="audio/video", source=str(p), segments=segs)
     raise IngestError(f"不支持的文件类型 {ext}，可用：txt/md/srt/vtt/json/pdf/音视频")
 

@@ -85,6 +85,34 @@ class TestCli(unittest.TestCase):
         rc = cli.main(["config", "--config", str(self.cfg_path)])
         self.assertEqual(rc, 0)
 
+    def test_fetch_local_media_with_stubbed_transcribe(self):
+        import course_agent.cli as cli_mod
+        from course_agent.pipeline.models import Segment
+        wav = self.td / "lesson.mp4"
+        wav.write_bytes(b"fake-video-bytes")
+        orig = cli_mod.transcribe_media
+        cli_mod.transcribe_media = lambda path, **k: [
+            Segment(start=0.0, text="大家好，开始上课。"),
+            Segment(start=3.0, text="今天讲事务。")]
+        try:
+            rc = cli_mod.main(["fetch", "--input", str(wav),
+                               "--config", str(self.cfg_path)])
+        finally:
+            cli_mod.transcribe_media = orig
+        self.assertEqual(rc, 0)
+        out = self.td / "data" / "transcripts"
+        srt = (out / "lesson.srt").read_text(encoding="utf-8")
+        txt = (out / "lesson.txt").read_text(encoding="utf-8")
+        self.assertIn("-->", srt)
+        self.assertIn("今天讲事务。", txt)
+
+    def test_fetch_rejects_plain_file(self):
+        bad = self.td / "notes.txt"
+        bad.write_text("普通文稿", encoding="utf-8")
+        rc = cli.main(["fetch", "--input", str(bad),
+                       "--config", str(self.cfg_path)])
+        self.assertEqual(rc, 1)
+
     def test_missing_input_file(self):
         rc = cli.main(["run", "--input", "不存在_9x.txt", "--mock",
                        "--no-memory", "--config", str(self.cfg_path)])
