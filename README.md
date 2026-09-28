@@ -48,34 +48,42 @@ python main.py run --input https://课程回放页 --password 页面密码
 | 网页 URL | 直接抓取正文；`--password` 会以查询参数/表单惯例传入 |
 | 视频/回放流 URL | m3u8 / mp4 直链，自动下载（优先 ffmpeg）→ 转写 → 整理 |
 
-## 三、腾讯会议课程怎么用
+## 三、腾讯会议课程怎么用（已实战验证）
 
-腾讯会议直播中的实时字幕没有对学员开放的程序接口，**课后**素材走以下三条路（按推荐顺序）：
+腾讯会议直播中的实时字幕没有对学员开放的程序接口，**课后**素材走以下三条路。
+用一条真实的回放链接（`meeting.tencent.com/crm/xxxx` + 提取码）完整验证过路径 A。
 
-**路径 A（最简单）：回放页直接下载**
-若老师分享回放时勾选了「允许下载」，在回放页直接下载 mp4，然后：
+**路径 A · 逐字稿（强烈推荐，无需下载视频，自带逐句时间戳）**
+
+腾讯会议回放页自带 AI 纪要（逐字稿），我们只需要把它的数据拿到手：
+
+1. 浏览器打开回放分享链接，输入提取码，确认能看到「纪要 / 逐字稿」
+2. F12 → Network → 筛选框输入 `minutes/detail`，右键该请求 → Copy → Copy link address
+3. 把地址里的 `limit=20` 改成 `limit=1000`，浏览器直接访问，全选另存为 `minutes.json`
+4. 转换并整理（转换器在 `tools/` 里，已随仓库提供）：
+
 ```bash
-python main.py run --input 录制.mp4 --title "课程名"
+python tools/convert_tencent_minutes.py minutes.json transcript.json
+python main.py run --input transcript.json --title "88、作业讲评"
 ```
 
-**路径 B（全自动）：回放分享链接 + 提取码**
-```bash
-python main.py fetch --input "https://meeting.tencent.com/v2/cloud-record/share.html?record_id=xxx" --password 提取码
-```
-`fetch` 会尝试自动从分享页提取视频流并下载转写为 srt/txt。由于回放页是 JS 渲染、
-播放流带时效 token，自动提取不一定成功——失败时助手会打印**分步引导**：浏览器 F12 →
-Network → 筛选 `m3u8` → 复制流地址，然后：
-```bash
-python main.py run --input "https://.../xxx.m3u8?token=..." --title "课程名"
-# 或只下载转写不整理：
-python main.py fetch --input "https://.../xxx.m3u8?token=..."
-```
-下载优先调用本机 ffmpeg（已检测到你装有 8.1.2）；无 ffmpeg 时自动退回纯标准库 HLS 下载。
+**路径 B · 视频（有屏幕演示、板书的课程）**
 
-**路径 C（最轻量）：会议转写文稿**
-老师若导出了「会议转写」（商业版功能），拿到 txt 直接 `run --input 文稿.txt`。
+Network 筛选 `mp4`：`recording-1_screen.mp4` 是屏幕共享、`recording-1_speaker.mp4`
+是摄像头。复制带 token 的地址（有时效，尽快用）：
 
-> 下载与整理仅限你合法拥有访问权限的课程回放，请遵守分享者设置的权限。
+```bash
+python main.py run --input "https://ylz.cos.meeting.tencent.com/cos/.../xxx_screen.mp4?token=..." --title "课程名"
+# 或只下载+转写：python main.py fetch --input "<地址>"
+```
+
+下载优先调用本机 ffmpeg（已检测到 8.1.2）；无 ffmpeg 时自动退回纯标准库 HLS 下载。
+
+**路径 C · 官方导出**：分享者勾选「允许下载」时直接在回放页下载 mp4 再 `run`；
+老师能导出「会议转写」文稿的话 `run --input 文稿.txt` 更轻量。
+
+> 无法自动化获取时，`fetch`/`run` 会打印以上分步引导。下载与整理仅限你合法
+> 拥有访问权限的课程回放，请遵守分享者设置的权限。
 
 ## 四、核心工作流（与你要求的流程一一对应）
 

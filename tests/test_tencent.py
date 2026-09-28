@@ -18,10 +18,13 @@ class TestDetect(unittest.TestCase):
     def test_share_link(self):
         self.assertTrue(is_tencent_share(SHARE))
         self.assertTrue(is_tencent_share(SHARE_NO_CODE))
+        self.assertTrue(is_tencent_share("https://meeting.tencent.com/crm/2ydzBry00f"))
+        self.assertTrue(is_tencent_share("https://meeting.tencent.com/cw/2ydzBry00f"))
 
     def test_non_share(self):
         self.assertFalse(is_tencent_share("https://example.com/vod/a.m3u8"))
         self.assertFalse(is_tencent_share("https://meeting.tencent.com/help"))
+        self.assertFalse(is_tencent_share("https://meeting.tencent.com/download"))
 
     def test_classify_url(self):
         self.assertEqual(classify_url(SHARE), "tencent_share")
@@ -95,7 +98,8 @@ class TestExtract(unittest.TestCase):
     def test_guided_steps(self):
         text = guided_steps(SHARE)
         self.assertIn("F12", text)
-        self.assertIn("m3u8", text)
+        self.assertIn("minutes/detail", text)
+        self.assertIn("mp4", text)
         self.assertIn("允许下载", text)
         self.assertIn(SHARE, text)
 

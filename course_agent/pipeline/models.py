@@ -103,7 +103,8 @@ class SectionOutput:
     knowledge_points: list[KnowledgePoint] = field(default_factory=list)
     key_nodes: list[KeyNode] = field(default_factory=list)
     exercises: list[Exercise] = field(default_factory=list)
-    source_excerpt: str = ""  # 源文本摘要，用于质检对照与范例沉淀
+    source_excerpt: str = ""  # 源文本摘要，用于范例沉淀
+    source_text: str = ""     # 完整源文本，供忠实度抽查对照证据
 
     def to_dict(self) -> dict[str, Any]:
         return {

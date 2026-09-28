@@ -127,9 +127,10 @@ def fidelity_check(llm: BaseLLM, sections: list[SectionOutput],
                           "answer": ex.answer})
         for i, it in enumerate(items):
             it["idx"] = i
-        source = sec.source_excerpt or "（截取）" + truncate(
+        # 忠实度判断需要完整证据：给裁判全节源文本（截断到提示词安全长度）
+        source = sec.source_text or ("（摘要）" + sec.source_excerpt) or "（截取）" + truncate(
             "\n".join(kp.detail for kp in sec.knowledge_points), 800)
-        prompt = render("qa_judge", source_text=truncate(source, 1600),
+        prompt = render("qa_judge", source_text=truncate(source, 3500),
                         items=json.dumps(items, ensure_ascii=False))
         try:
             raw = llm.chat(prompt, "请只输出质检 JSON。")

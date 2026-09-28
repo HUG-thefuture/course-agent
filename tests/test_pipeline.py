@@ -210,6 +210,32 @@ class TestOrchestrator(unittest.TestCase):
             self.assertIn("知识点", notes)
 
 
+class TestFidelityEvidence(unittest.TestCase):
+    """忠实度裁判必须看到完整节源文本，而不是 600 字摘要。"""
+
+    def test_judge_receives_full_source_text(self):
+        from course_agent.llm.base import BaseLLM
+        from course_agent.pipeline.tester import fidelity_check
+
+        MARKER = "MARKER_BEYOND_600_CHARS_证据在摘要之外"
+
+        class _Judge(BaseLLM):
+            name = "judge"
+
+            def chat(self, system, user, **kw):
+                # 只有把完整源文本传给裁判，测试才会通过
+                if MARKER in system:
+                    return '{"items": [{"idx": 0, "supported": true}]}'
+                return '{"items": [{"idx": 0, "supported": false, "reason": "看不到证据"}]}'
+
+        sec = _section_ok()
+        sec.source_excerpt = sec.source_text[:600]
+        sec.source_text = "填充" * 700 + MARKER
+        out = fidelity_check(_Judge(), [sec], PipelineConfig())
+        self.assertEqual(out.ratio, 1.0)
+        self.assertEqual(out.issues, [])
+
+
 class TestExecutor(unittest.TestCase):
     def test_section_generation_with_mock(self):
         from course_agent.utils import fmt_time

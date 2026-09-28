@@ -100,6 +100,9 @@ def generate_section(llm: BaseLLM, course_title: str, psec: PlanSection,
     start_raw = next((chunks[i].start_time for i in psec.chunk_indices
                       if chunks[i].start_time is not None), None)
     start_time = fmt_time(start_raw)
+    anchors = "\n".join(
+        f"#{i}: {fmt_time(chunks[i].start_time)}"
+        for i in psec.chunk_indices if chunks[i].start_time is not None)
     exemplars = _exemplar_block(memory, psec.title + " " + text[:200])
 
     # ---- 知识点 + 关键节点 ----
@@ -111,6 +114,7 @@ def generate_section(llm: BaseLLM, course_title: str, psec: PlanSection,
             "notes", title=course_title, section_title=psec.title,
             has_timestamps="true" if has_ts else "false",
             start_time=start_time or "无",
+            time_anchors=anchors or "无",
             source_text=text, exemplars=exemplars,
         ) + _render_notes_retry(last_err)
         try:
@@ -156,5 +160,5 @@ def generate_section(llm: BaseLLM, course_title: str, psec: PlanSection,
     return SectionOutput(
         title=psec.title, goals=list(psec.goals),
         knowledge_points=kps, key_nodes=nodes, exercises=exercises,
-        source_excerpt=text[:600],
+        source_excerpt=text[:600], source_text=text,
     )

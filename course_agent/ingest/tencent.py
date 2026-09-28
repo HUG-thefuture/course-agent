@@ -1,15 +1,17 @@
 """腾讯会议云录制回放适配器。
 
-分享链接形如：
-  https://meeting.tencent.com/v2/cloud-record/share.html?record_id=xxx&access_code=yyy
+分享链接形态（2026-09 实测）：
+  短链:   https://meeting.tencent.com/crm/2ydzBry00f
+  移动页: https://meeting.tencent.com/cw/2ydzBry00f   （短链 JS 跳转目标）
+  PC 页:  https://meeting.tencent.com/v2/cloud-record/share.html?record_id=xxx
 
-现实情况（2026-09 调研）：回放页是 JS 渲染的，播放流地址由页面用 record_id +
-access_code 向腾讯接口换取，通常还带时效 token，服务端直接抓 HTML 往往拿不到。
-因此本适配器采用两层策略：
-  1. 自动尝试：抓分享页并正则扫描内嵌的 m3u8/mp4 地址（部分场景可用）；
-  2. 引导抓取：自动失败时输出清晰的浏览器抓流步骤，用户把 m3u8/mp4 地址交给
-     `python main.py run --input <流地址>`，后续下载/转写/整理全自动。
-另外，若分享者勾选了"允许下载"，直接从回放页下载 mp4 后喂给 run 命令最简单可靠。
+实测结论：回放页 JS 渲染 + 网关签名，纯服务端抓 HTML 拿不到播放数据。两条可用路径：
+  A. 逐字稿路径（推荐，无需转写）：回放页含 AI 纪要，F12 -> Network 筛选
+     `minutes/detail`，把返回 JSON 交给 tools/convert_tencent_minutes.py
+     转成管线输入（自带时间戳，精确到句）；
+  B. 视频路径：Network 筛选 `mp4`（speaker=摄像头 / screen=屏幕共享两路），
+     复制带 token 的 mp4 地址交给 `run`（ffmpeg 下载后本地转写）。
+页面密码（提取码）在页面内输入，鉴权后接口与媒体地址才可见。
 
 注意：仅处理你合法拥有访问权限的课程回放，下载请遵守分享者设置的权限。
 """
@@ -22,7 +24,7 @@ import urllib.parse
 
 _log = logging.getLogger(__name__)
 
-_SHARE_MARKERS = ("meeting.tencent.com", "cloud-record")
+_SHARE_HOST = "meeting.tencent.com"
 _MEDIA_RE = re.compile(
     r"https?://[^\s\"'<>\\]+?\.(?:m3u8|mp4)(?:\?[^\s\"'<>\\]*)?")
 # JS/JSON 里常见的转义先还原，避免漏检
@@ -31,7 +33,10 @@ _UNESCAPES = (("\\/", "/"), ("\\u0026", "&"), ("\\x26", "&"))
 
 def is_tencent_share(url: str) -> bool:
     low = (url or "").lower()
-    return all(m in low for m in _SHARE_MARKERS) or "share.html" in low and "meeting.tencent.com" in low
+    if _SHARE_HOST not in low:
+        return False
+    return any(m in low for m in (
+        "/crm/", "/cw/", "/cloud-record", "share.html"))
 
 
 def add_access_code(url: str, password: str) -> str:
@@ -71,14 +76,21 @@ def try_extract_video_url(share_url: str, password: str = "",
 
 def guided_steps(share_url: str) -> str:
     return (
-        "无法自动从腾讯会议分享页提取视频流（页面为 JS 渲染 + 时效 token，属正常情况）。\n"
-        "请按以下步骤抓一次播放地址（约 1 分钟，拿到地址后一切自动）：\n"
-        f"  1. 浏览器打开回放链接并输入提取码（确认能正常播放）: {share_url}\n"
-        "  2. 按 F12 打开开发者工具 → Network（网络）标签 → 筛选框输入 m3u8\n"
-        "  3. 刷新页面并播放回放，找到形如 xxx.m3u8?token=... 的请求\n"
-        "  4. 右键该请求 → Copy → Copy link address（复制完整地址，注意有时效尽快使用）\n"
-        "  5. 运行: python main.py run --input \"<刚才复制的m3u8地址>\" --title \"课程名\"\n"
-        "备选路径：\n"
-        "  A. 若分享者勾选了“允许下载”，直接在回放页下载 mp4，然后 run --input 文件.mp4\n"
-        "  B. 若老师能导出会议转写文稿（商业版功能），run --input 文稿.txt 更轻量\n"
+        "无法从该腾讯会议链接自动提取数据（页面 JS 渲染 + 网关签名，属正常情况）。\n"
+        f"回放链接: {share_url}\n"
+        "请在浏览器打开链接并输入提取码，确认能正常播放后，二选一：\n"
+        "\n【路径 A · 逐字稿（推荐，无需下载视频、自带精确时间戳）】\n"
+        "  1. F12 打开开发者工具 -> Network（网络）标签 -> 筛选框输入 minutes/detail\n"
+        "  2. 点击页面上方「纪要/逐字稿」，右键该请求 -> Copy -> Copy link address\n"
+        "  3. 把地址里的 limit=20 改成 limit=1000，浏览器直接访问，全选保存为 minutes.json\n"
+        "  4. 运行:\n"
+        "     python tools/convert_tencent_minutes.py minutes.json transcript.json\n"
+        "     python main.py run --input transcript.json --title \"课程名\"\n"
+        "\n【路径 B · 视频（截图演示类课程用）】\n"
+        "  1. Network 筛选框输入 mp4，找到 recording-1_screen.mp4（屏幕共享）\n"
+        "     或 recording-1_speaker.mp4（摄像头），右键 Copy link address\n"
+        "  2. 尽快运行（token 有时效）:\n"
+        "     python main.py run --input \"<复制的mp4地址>\" --title \"课程名\"\n"
+        "     或只下载转写: python main.py fetch --input \"<地址>\"\n"
+        "备选：若分享者勾选了「允许下载」，直接在回放页下载 mp4 再 run。\n"
     )
