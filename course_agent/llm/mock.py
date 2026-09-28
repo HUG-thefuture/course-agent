@@ -35,11 +35,13 @@ def _sentences(text: str) -> list[str]:
 
 class MockLLM(BaseLLM):
     def __init__(self, fail_plan: int = 0, fail_review: int = 0,
-                 fail_notes: int = 0, fail_qa: int = 0) -> None:
+                 fail_notes: int = 0, fail_qa: int = 0,
+                 fail_coding: int = 0) -> None:
         self.fail_plan = fail_plan
         self.fail_review = fail_review
         self.fail_notes = fail_notes
         self.fail_qa = fail_qa
+        self.fail_coding = fail_coding
         self.calls = 0
 
     @property
@@ -59,6 +61,7 @@ class MockLLM(BaseLLM):
             "REVIEW": self._review,
             "NOTES": self._notes,
             "EXERCISES": self._exercises,
+            "CODING": self._coding,
             "QA_JUDGE": self._qa,
         }.get(task, self._think)
         return handler(combined)
@@ -169,6 +172,28 @@ class MockLLM(BaseLLM):
                 "explanation": "参考课程讲解内容作答即可。",
                 "difficulty": "medium",
             },
+        ]
+        return json.dumps({"exercises": exercises}, ensure_ascii=False)
+
+    def _coding(self, user: str) -> str:
+        if self.fail_coding > 0:
+            self.fail_coding -= 1
+            return "（模拟故障：坏输出）"
+        title = _field(user, "章节标题") or "本节"
+        source = _block(user, "源文本")
+        sents = _sentences(source) or [f"{title}的核心功能"]
+        task = sorted(sents, key=len, reverse=True)[0]
+        exercises = [
+            {
+                "type": "coding_practice",
+                "question": f"编程实战：结合「{title}」的内容，动手实现课程中演示的功能——{task[:40]}。要求代码可运行，并处理课程中提到的边界情况。",
+                "starter_code": "// TODO: 按课程讲解补全实现\nfunction solve() {\n  // your code here\n}\n",
+                "answer": "// 参考实现（结合课程要点）\nfunction solve() {\n  // " + task[:60] + "\n  return 'ok';\n}\n",
+                "hints": ["回顾课程中对该功能的分步讲解", "先跑通最小流程，再补边界情况"],
+                "check_points": ["功能与课程演示一致", "处理了课程提到的易错点", "命名与结构清晰"],
+                "explanation": f"本题对应课程原文：{task[:80]}",
+                "difficulty": "medium",
+            }
         ]
         return json.dumps({"exercises": exercises}, ensure_ascii=False)
 

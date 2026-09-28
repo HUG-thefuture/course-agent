@@ -89,6 +89,29 @@ def _parse_exercises(data) -> tuple[list[Exercise], list[str]]:
     return out, problems
 
 
+def _generate_coding(llm: BaseLLM, course_title: str, section_title: str,
+                     text: str) -> list:
+    """生成编程实战题：最多重试 1 次，全部失败抛异常由调用方降级。"""
+    last_err = ""
+    for attempt in range(2):
+        prompt = render("coding_practice", title=course_title,
+                        section_title=section_title, source_text=text)
+        if last_err:
+            prompt += f"\n【修正要求】上一次输出问题：{last_err}，请修正后严格按 JSON 重新输出。"
+        try:
+            raw = llm.chat(prompt, "请只输出 JSON。", max_tokens=3072)
+            coding, problems = _parse_exercises(extract_json(raw))
+            if problems:
+                _log.info("章节「%s」编程题 %d 道未通过校验被丢弃",
+                          truncate(section_title, 20), len(problems))
+            return coding[:2]
+        except (ValueError, TypeError) as e:
+            last_err = str(e)
+            _log.warning("编程题生成第 %d 次失败（%s）: %s",
+                         attempt + 1, truncate(section_title, 20), e)
+    raise ExecuteError(last_err)
+
+
 def generate_section(llm: BaseLLM, course_title: str, psec: PlanSection,
                      chunks: list[Chunk], pcfg, memory: Memory | None = None) -> SectionOutput:
     """生成单个章节的完整产物。模型输出异常时带错误信息重试一次。"""
@@ -156,6 +179,15 @@ def generate_section(llm: BaseLLM, course_title: str, psec: PlanSection,
                          attempt + 1, truncate(psec.title, 20), e)
     else:
         raise ExecuteError(f"章节「{psec.title}」习题生成失败: {last_err}")
+
+    # ---- 编程实战题（独立调用，失败不阻断主流程）----
+    if getattr(pcfg, "coding_practice", True):
+        try:
+            coding = _generate_coding(llm, course_title, psec.title, text)
+            exercises.extend(coding)
+        except Exception as e:  # 增强功能：任何失败都只降级为无编程题
+            _log.warning("章节「%s」编程题生成失败（已跳过）: %s",
+                         truncate(psec.title, 20), e)
 
     return SectionOutput(
         title=psec.title, goals=list(psec.goals),

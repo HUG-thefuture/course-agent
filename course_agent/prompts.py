@@ -8,7 +8,8 @@ from typing import Any
 
 _PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 
-_ALLOWED = {"think", "plan", "review", "notes", "exercises", "qa_judge"}
+_ALLOWED = {"think", "plan", "review", "notes", "exercises", "qa_judge",
+            "coding_practice"}
 
 
 class PromptError(Exception):

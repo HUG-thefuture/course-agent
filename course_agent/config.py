@@ -44,6 +44,7 @@ class PipelineConfig:
     fidelity_sample: int = 2       # 测试阶段每节抽查的条目数
     fidelity_threshold: float = 0.8
     exemplar_min_score: int = 70   # 达到此分数的章节才沉淀为少样本范例
+    coding_practice: bool = True   # 是否生成编程实战题（失败不影响主流程）
 
 
 @dataclass

@@ -14,7 +14,8 @@ from ..utils import extract_json, truncate
 
 _log = logging.getLogger(__name__)
 
-VALID_TYPES = {"single_choice", "multi_choice", "true_false", "fill_blank", "short_answer"}
+VALID_TYPES = {"single_choice", "multi_choice", "true_false", "fill_blank",
+               "short_answer", "coding_practice"}
 VALID_DIFFICULTY = {"easy", "medium", "hard"}
 _BOOL_ANSWERS = {"对", "错", "是", "否", "正确", "错误", "true", "false"}
 
@@ -54,6 +55,13 @@ def validate_exercise(d: dict) -> list[str]:
     elif t == "fill_blank":
         if "____" not in (q or ""):
             errs.append("填空题题干必须包含 ____")
+    elif t == "coding_practice":
+        if len(ans.strip()) < 8:
+            errs.append("编程题参考实现过短")
+        if isinstance(d.get("hints"), list) and len(d["hints"]) > 5:
+            errs.append("提示条数过多")
+        if isinstance(d.get("check_points"), list) and len(d["check_points"]) > 6:
+            errs.append("验收要点条数过多")
     diff = d.get("difficulty", "medium")
     if diff not in VALID_DIFFICULTY:
         errs.append(f"难度 {diff!r} 不合法")
@@ -63,6 +71,8 @@ def validate_exercise(d: dict) -> list[str]:
 
 
 def exercise_from_dict(d: dict) -> Exercise:
+    hints = d.get("hints")
+    checks = d.get("check_points")
     return Exercise(
         type=d["type"],
         question=d.get("question", ""),
@@ -70,6 +80,9 @@ def exercise_from_dict(d: dict) -> Exercise:
         explanation=d.get("explanation", "") if isinstance(d.get("explanation"), str) else "",
         options=[str(o) for o in d.get("options") or []],
         difficulty=d.get("difficulty") if d.get("difficulty") in VALID_DIFFICULTY else "medium",
+        starter_code=d.get("starter_code", "") if isinstance(d.get("starter_code"), str) else "",
+        hints=[str(h) for h in hints if str(h).strip()] if isinstance(hints, list) else [],
+        check_points=[str(c) for c in checks if str(c).strip()] if isinstance(checks, list) else [],
     )
 
 

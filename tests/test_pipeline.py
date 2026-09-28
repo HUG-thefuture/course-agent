@@ -70,6 +70,21 @@ class TestValidateExercise(unittest.TestCase):
         self.assertTrue(validate_exercise(_valid_exercise(
             answer="E", options=["一", "二"])))
 
+    def test_coding_practice_valid(self):
+        d = _valid_exercise(
+            type="coding_practice", options=[],
+            question="实现 TodoItem 组件的状态切换",
+            answer="function toggle(todo) { todo.done = !todo.done; }",
+            starter_code="// TODO\n", hints=["用 defineEmits"],
+            check_points=["状态切换正确", "事件传递正确"])
+        self.assertEqual(validate_exercise(d), [])
+
+    def test_coding_practice_short_answer_rejected(self):
+        errs = validate_exercise(_valid_exercise(
+            type="coding_practice", options=[], question="实现一个功能",
+            answer="略", hints=[], check_points=[]))
+        self.assertTrue(any("过短" in e for e in errs))
+
 
 def _plan_ok():
     return Plan(course_title="课", sections=[
@@ -194,6 +209,22 @@ class TestOrchestrator(unittest.TestCase):
         self.assertTrue(result.passed)
         self.assertEqual(len(result.attempts), 2)
 
+    def test_coding_practice_generated(self):
+        sec = self._run(MockLLM()).sections[0]
+        coding = [e for e in sec.exercises if e.type == "coding_practice"]
+        self.assertTrue(coding)
+        ce = coding[0]
+        self.assertTrue(ce.starter_code)
+        self.assertTrue(ce.hints)
+        self.assertTrue(ce.check_points)
+
+    def test_coding_failure_is_non_fatal(self):
+        result = self._run(MockLLM(fail_coding=99))
+        self.assertTrue(result.passed)
+        for sec in result.sections:
+            self.assertFalse(any(e.type == "coding_practice" for e in sec.exercises))
+            self.assertGreaterEqual(len(sec.exercises), 2)
+
     def test_write_outputs(self):
         result = self._run(MockLLM())
         with tempfile.TemporaryDirectory() as td:
@@ -206,6 +237,9 @@ class TestOrchestrator(unittest.TestCase):
                 self.assertGreater(Path(files[name]).stat().st_size, 0)
             ex = Path(files["exercises.md"]).read_text(encoding="utf-8")
             self.assertIn("参考答案", ex)
+            self.assertIn("编程实战", ex)
+            self.assertIn("验收要点", ex)
+            self.assertIn("起始代码", ex)
             notes = Path(files["notes.md"]).read_text(encoding="utf-8")
             self.assertIn("知识点", notes)
 
@@ -245,8 +279,9 @@ class TestExecutor(unittest.TestCase):
         psec = PlanSection(title="事务失效", chunk_indices=[0], exercise_count=4)
         sec = generate_section(llm, "测试课", psec, chunks, PipelineConfig())
         self.assertGreaterEqual(len(sec.knowledge_points), 1)
-        self.assertEqual(len(sec.exercises), 4)
+        self.assertEqual(len(sec.exercises), 5)  # 4 道常规题 + 1 道编程实战题
         self.assertTrue(any(e.type == "fill_blank" for e in sec.exercises))
+        self.assertTrue(any(e.type == "coding_practice" for e in sec.exercises))
         self.assertTrue(sec.source_excerpt)
 
     def test_out_of_range_chunk(self):

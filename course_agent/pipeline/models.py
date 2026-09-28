@@ -76,12 +76,15 @@ class KeyNode:
 
 @dataclass
 class Exercise:
-    type: str  # single_choice / multi_choice / true_false / fill_blank / short_answer
+    type: str  # single_choice / multi_choice / true_false / fill_blank / short_answer / coding_practice
     question: str
     answer: str
     explanation: str = ""
     options: list[str] = field(default_factory=list)
     difficulty: str = "medium"
+    starter_code: str = ""          # 编程题：代码骨架（含 TODO）
+    hints: list[str] = field(default_factory=list)          # 编程题：思路提示
+    check_points: list[str] = field(default_factory=list)   # 编程题：验收要点
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -93,6 +96,13 @@ class Exercise:
         }
         if self.type in ("single_choice", "multi_choice"):
             d["options"] = list(self.options)
+        if self.type == "coding_practice":
+            if self.starter_code:
+                d["starter_code"] = self.starter_code
+            if self.hints:
+                d["hints"] = list(self.hints)
+            if self.check_points:
+                d["check_points"] = list(self.check_points)
         return d
 
 

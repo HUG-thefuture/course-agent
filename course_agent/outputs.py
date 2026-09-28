@@ -14,8 +14,14 @@ _log = logging.getLogger(__name__)
 
 _TYPE_LABEL = {
     "single_choice": "单选", "multi_choice": "多选", "true_false": "判断",
-    "fill_blank": "填空", "short_answer": "简答",
+    "fill_blank": "填空", "short_answer": "简答", "coding_practice": "编程实战",
 }
+
+
+def _code_block(code: str) -> str:
+    if not code:
+        return ""
+    return f"\n```\n{code.strip()}\n```\n"
 
 
 def _w(path: Path, text: str) -> None:
@@ -76,8 +82,23 @@ def _exercises_md(result: SessionResult) -> str:
             if e.options:
                 for letter, opt in zip("ABCDEFGH", e.options):
                     lines.append(f"   - {letter}. {opt}")
+            if e.type == "coding_practice":
+                if e.starter_code:
+                    lines.append("")
+                    lines.append("   **起始代码：**")
+                    lines.append(_code_block(e.starter_code))
+                if e.hints:
+                    lines.append("   **提示：** " + "；".join(e.hints))
             lines.append("")
-            answers.append(f"**{no}.** {e.answer}")
+            answers.append(f"**{no}.**")
+            if e.type == "coding_practice":
+                answers.append(_code_block(e.answer))
+                if e.check_points:
+                    answers.append("   **验收要点：**")
+                    for cp in e.check_points:
+                        answers.append(f"   - [ ] {cp}")
+            else:
+                answers.append(f"   {e.answer}")
             if e.explanation:
                 answers.append(f"   解析：{e.explanation}")
         lines.append("")
