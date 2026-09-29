@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import sys
 import threading
 import time
 import urllib.parse
@@ -198,6 +200,56 @@ def _build_llm(cfg: AgentConfig):
     return Router(clients)
 
 
+# ------------------------------------------------------------------ 在线测试
+def run_code_tests(code: str, tests: list[str], language: str,
+                   timeout: int = 10) -> dict:
+    """编程题在线测试：把用户代码与每条断言拼接后真实执行。
+
+    支持 python（本机解释器）与 javascript（需本机 node）；
+    每条断言独立运行，返回逐条通过/失败与输出。
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    if language == "python":
+        runner = [sys.executable]
+    elif language == "javascript" and shutil.which("node"):
+        runner = [shutil.which("node")]
+    else:
+        return {"runnable": False,
+                "reason": "该题不支持本机自动测试（框架/页面类题目请交卷后由 AI 评审）"}
+
+    results = []
+    for i, test in enumerate(tests):
+        script = code.rstrip() + "\n\n" + test + "\n"
+        if language == "javascript":
+            # node 无内置 assert，注入与浏览器约定一致的断言垫片
+            script = ("function assert(cond, msg) { if (!cond) "
+                      "throw new Error('AssertionError' + (msg ? ': ' + msg : '')); }\n"
+                      + script)
+        fd, tmp = tempfile.mkstemp(suffix=".py" if language == "python" else ".js")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(script)
+            try:
+                proc = subprocess.run([*runner, tmp], capture_output=True,
+                                      text=True, timeout=timeout,
+                                      encoding="utf-8", errors="replace")
+                ok = proc.returncode == 0
+                out = (proc.stderr or proc.stdout or "").strip()
+                results.append({"idx": i, "test": test, "passed": ok,
+                                "output": truncate(out, 400)})
+            except subprocess.TimeoutExpired:
+                results.append({"idx": i, "test": test, "passed": False,
+                                "output": f"超时（>{timeout}s），检查是否存在死循环"})
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+    passed = sum(1 for r in results if r["passed"])
+    return {"runnable": True, "results": results,
+            "passed": passed, "total": len(results)}
+
+
 # ------------------------------------------------------------------ 进度存取
 def _progress_path(cfg: AgentConfig, cid: str) -> Path:
     return Path(cfg.data_dir) / "webui_progress" / (re.sub(r"[^\w.-]", "_", cid) + ".json")
@@ -309,6 +361,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if u.path == "/api/grade":
                 return self._json(self._handle_grade(body))
+            if u.path == "/api/run_tests":
+                code = str(body.get("code") or "")
+                tests = [str(t) for t in body.get("tests") or []]
+                lang = str(body.get("language") or "")
+                if not code.strip() or not tests:
+                    return self._json({"error": "code 与 tests 不能为空"}, 400)
+                return self._json(run_code_tests(code, tests, lang))
             if u.path == "/api/progress":
                 cid = body.get("course", "")
                 if not cid:
@@ -472,8 +531,8 @@ function renderQuiz(si){
     if(e.options&&e.options.length)body=e.options.map((o,j)=>`<label class="kp"><input type="${e.type==='multi_choice'?'checkbox':'radio'}" name="q${i}" value="${"ABCDEFGH"[j]}"> ${"ABCDEFGH"[j]}. ${h(o)}</label>`).join("");
     else if(e.type==="true_false")body=`<label class="kp"><input type="radio" name="q${i}" value="对"> 对</label><label class="kp"><input type="radio" name="q${i}" value="错"> 错</label>`;
     else if(e.type==="fill_blank")body=`<input id="a${i}" placeholder="填入答案">`;
-    else if(e.type==="coding_practice")body=(e.starter_code?`<pre>${h(e.starter_code)}</pre>`:"")+`<textarea id="a${i}" placeholder="粘贴你的实现代码，AI 将对照验收要点评审"></textarea>`+(e.hints&&e.hints.length?`<div class="dim">提示：${h(e.hints.join("；"))}</div>`:"");
-    else body=`<textarea id="a${i}" placeholder="写下你的回答，AI 对照参考答案点评"></textarea>`;
+    else if(e.type==="coding_practice")body=(e.starter_code?`<pre>${h(e.starter_code)}</pre>`:"")+`<textarea id="a${i}" placeholder="粘贴你的实现代码"></textarea>`+(e.hints&&e.hints.length?`<div class="dim">提示：${h(e.hints.join("；"))}</div>`:"")+(e.tests&&e.tests.length?`<button class="mini" onclick="runTests(${si},${i})">▶ 在线测试（${e.tests.length} 条断言）</button><div id="t${i}"></div>`:"")+(e.answer?`<details><summary class="dim">查看完整参考实现</summary><pre>${h(e.answer)}</pre></details>`:"");
+    else body=`<textarea id="a${i}" placeholder="写下你的回答，AI 对照参考答案点评"></textarea>`+(e.answer?`<details><summary class="dim">查看参考答案</summary><pre>${h(e.answer)}</pre></details>`:"");
     return `<div class="ex"><b>${i+1}.</b> ${h(e.question)}<span class="tag">${t}·${e.difficulty||""}</span>${body}<div id="r${i}"></div></div>`;
   }).join("");
   $("#quiz-nav").innerHTML=`<button class="pri" onclick="submitQuiz(${si})">交卷判分</button>
@@ -484,7 +543,9 @@ function renderQuiz(si){
 function nextQuiz(si){submitQuiz(si,true)}
 function collect(si){
   return (DATA.sections[si].exercises||[]).map((e,i)=>{
-    if(e.options&&e.options.length)return[...document.querySelectorAll(`input[name=q${i}]:checked`)].map(x=>x.value).join("");
+    // 选择类（单选/多选/判断）统一读 checked 项，判断题的 radio 也走这里
+    const checked=[...document.querySelectorAll(`input[name=q${i}]:checked`)].map(x=>x.value).join("");
+    if(checked)return checked;
     const el=document.getElementById("a"+i);return el?el.value:"";
   });
 }
@@ -498,11 +559,24 @@ async function submitQuiz(si,move){
     if(r.score===null){el.innerHTML=`<div class="res mid">⚠️ ${h(r.note)}</div>`;return}
     const cls=r.correct?"ok":(r.score>=60?"mid":"bad");
     let extra=r.feedback?`<div class="dim">AI 点评：${h(r.feedback)}</div>`:"";
-    if(!r.correct&&r.reference)extra+=`<div class="dim">参考：${h(String(r.reference)).slice(0,220)}</div>`;
+    if(!r.correct&&r.reference)extra+=`<details><summary class="dim">完整参考答案</summary><pre>${h(String(r.reference))}</pre></details>`;
     el.innerHTML=`<div class="res ${cls}">${r.correct?"✅":"❌"} ${r.score} 分 ${r.verdict||""} ${r.note?("· "+h(r.note)):""}</div>${extra}`;
   });
   $("#quiz-sum").textContent=`本章判分：${d.summary.correct}/${d.summary.graded} 题正确，平均 ${d.summary.avg} 分`+(d.summary.llm_error?`（主观题异常：${d.summary.llm_error}）`:"");
   if(move&&DATA.sections[si+1])renderQuiz(si+1);
+}
+async function runTests(si,i){
+  const el=document.getElementById("t"+i);if(!el)return;
+  const e=DATA.sections[si].exercises[i];
+  const codeEl=document.getElementById("a"+i);
+  const code=codeEl?codeEl.value:"";
+  el.innerHTML='<span class="dim">⏳ 运行测试中…</span>';
+  const d=await api("/api/run_tests",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({code,tests:e.tests,language:e.language||"python"})});
+  if(d.error){el.innerHTML=`<div class="res bad">❌ ${h(d.error)}</div>`;return}
+  if(!d.runnable){el.innerHTML=`<div class="res mid">ℹ️ ${h(d.reason)}</div>`;return}
+  el.innerHTML=`<div class="res ${d.passed===d.total?'ok':'bad'}">在线测试：通过 ${d.passed}/${d.total}</div>`+
+    d.results.map(r=>`<div class="${r.passed?'ok':'bad'}">${r.passed?"✅":"❌"} 断言${r.idx+1}${r.output?` <span class="dim">${h(r.output).slice(0,180)}</span>`:""}</div>`).join("");
 }
 
 async function startRun(){

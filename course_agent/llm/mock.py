@@ -204,13 +204,15 @@ class MockLLM(BaseLLM):
         exercises = [
             {
                 "type": "coding_practice",
-                "question": f"编程实战：结合「{title}」的内容，动手实现课程中演示的功能——{task[:40]}。要求代码可运行，并处理课程中提到的边界情况。",
-                "starter_code": "// TODO: 按课程讲解补全实现\nfunction solve() {\n  // your code here\n}\n",
-                "answer": "// 参考实现（结合课程要点）\nfunction solve() {\n  // " + task[:60] + "\n  return 'ok';\n}\n",
+                "question": f"编程实战：结合「{title}」的内容，实现函数 solve()，返回课程中演示的核心结果（本题以字符串 'ok' 为验收约定）。",
+                "starter_code": "def solve():\n    # TODO: 按课程讲解补全实现\n    pass\n",
+                "answer": "def solve():\n    # 参考实现（结合课程要点：" + task[:40] + "）\n    return 'ok'\n",
                 "hints": ["回顾课程中对该功能的分步讲解", "先跑通最小流程，再补边界情况"],
                 "check_points": ["功能与课程演示一致", "处理了课程提到的易错点", "命名与结构清晰"],
                 "explanation": f"本题对应课程原文：{task[:80]}",
                 "difficulty": "medium",
+                "language": "python",
+                "tests": ["assert solve() == 'ok'"],
             }
         ]
         return json.dumps({"exercises": exercises}, ensure_ascii=False)

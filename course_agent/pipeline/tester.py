@@ -16,6 +16,7 @@ _log = logging.getLogger(__name__)
 
 VALID_TYPES = {"single_choice", "multi_choice", "true_false", "fill_blank",
                "short_answer", "coding_practice"}
+VALID_LANGUAGES = {"python", "javascript", "other"}
 VALID_DIFFICULTY = {"easy", "medium", "hard"}
 _BOOL_ANSWERS = {"对", "错", "是", "否", "正确", "错误", "true", "false"}
 
@@ -62,6 +63,11 @@ def validate_exercise(d: dict) -> list[str]:
             errs.append("提示条数过多")
         if isinstance(d.get("check_points"), list) and len(d["check_points"]) > 6:
             errs.append("验收要点条数过多")
+        lang = d.get("language")
+        if lang and lang not in VALID_LANGUAGES:
+            errs.append(f"language {lang!r} 不合法")
+        if isinstance(d.get("tests"), list) and len(d["tests"]) > 8:
+            errs.append("测试断言条数过多")
     diff = d.get("difficulty", "medium")
     if diff not in VALID_DIFFICULTY:
         errs.append(f"难度 {diff!r} 不合法")
@@ -73,6 +79,8 @@ def validate_exercise(d: dict) -> list[str]:
 def exercise_from_dict(d: dict) -> Exercise:
     hints = d.get("hints")
     checks = d.get("check_points")
+    tests = d.get("tests")
+    lang = d.get("language")
     return Exercise(
         type=d["type"],
         question=d.get("question", ""),
@@ -83,6 +91,8 @@ def exercise_from_dict(d: dict) -> Exercise:
         starter_code=d.get("starter_code", "") if isinstance(d.get("starter_code"), str) else "",
         hints=[str(h) for h in hints if str(h).strip()] if isinstance(hints, list) else [],
         check_points=[str(c) for c in checks if str(c).strip()] if isinstance(checks, list) else [],
+        language=lang if lang in VALID_LANGUAGES else "",
+        tests=[str(t).strip() for t in tests if str(t).strip()] if isinstance(tests, list) else [],
     )
 
 

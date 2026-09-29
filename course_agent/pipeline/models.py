@@ -96,6 +96,8 @@ class Exercise:
     starter_code: str = ""          # 编程题：代码骨架（含 TODO）
     hints: list[str] = field(default_factory=list)          # 编程题：思路提示
     check_points: list[str] = field(default_factory=list)   # 编程题：验收要点
+    language: str = ""              # 编程题：python / javascript / other
+    tests: list[str] = field(default_factory=list)          # 编程题：可执行测试断言
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -114,6 +116,10 @@ class Exercise:
                 d["hints"] = list(self.hints)
             if self.check_points:
                 d["check_points"] = list(self.check_points)
+            if self.language:
+                d["language"] = self.language
+            if self.tests:
+                d["tests"] = list(self.tests)
         return d
 
 
