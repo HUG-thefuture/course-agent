@@ -32,11 +32,12 @@ def transcribe_media(path: str | Path, model_size: str | None = None) -> list[Se
             "音视频转写需要 faster-whisper：pip install faster-whisper\n"
             "  （CPU 即可运行；也可以改用字幕/文稿输入绕过转写）") from e
     size = model_size or os.environ.get("COURSE_AGENT_WHISPER_MODEL", "small")
+    beam = int(os.environ.get("COURSE_AGENT_WHISPER_BEAM", "5"))
     t0 = time.time()
     try:
         model = WhisperModel(size, device="cpu", compute_type="int8")
         segments_iter, info = model.transcribe(str(path), vad_filter=True,
-                                               language=None, beam_size=5)
+                                               language=None, beam_size=beam)
         segments = [Segment(start=seg.start, text=seg.text.strip())
                     for seg in segments_iter if seg.text.strip()]
     except Exception as e:
