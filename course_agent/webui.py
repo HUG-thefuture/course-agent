@@ -523,19 +523,44 @@ loadCourses();
 # ------------------------------------------------------------------ 入口
 def main(argv: list[str] | None = None) -> int:
     import argparse
+    import os
+    import sys
+
     ap = argparse.ArgumentParser(description="CourseAgent 图形界面")
     ap.add_argument("--port", type=int, default=_PORT)
     ap.add_argument("--config", default=None)
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args(argv or [])
 
-    setup_logging()
     cfg = load_config(args.config)
+
+    # pythonw（无控制台）下 stdout/stderr 是 None，任何 print 都会崩。
+    # 重定向：stdout 丢弃，stderr 落到日志文件便于排查启动问题。
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        errlog = Path(cfg.data_dir) / "webui_stderr.log"
+        errlog.parent.mkdir(parents=True, exist_ok=True)
+        sys.stderr = open(errlog, "a", encoding="utf-8", errors="replace")
+
+    setup_logging()
     Handler.cfg = cfg
     Handler.llm = _build_llm(cfg)
 
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    url = f"http://127.0.0.1:{args.port}"
+    server = None
+    used_port = args.port
+    for port in (args.port, args.port + 1, args.port + 2):
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            used_port = port
+            break
+        except OSError:
+            continue  # 端口被占（多半已有实例）自动顺延
+    if server is None:
+        print(f"[CourseAgentUI] 端口 {args.port}~{args.port + 2} 均无法绑定")
+        return 1
+
+    url = f"http://127.0.0.1:{used_port}"
     print(f"CourseAgent 图形界面已启动: {url} （Ctrl+C 停止）")
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
