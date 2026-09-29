@@ -463,6 +463,7 @@ button.pri{background:var(--acc);border:none;color:#08101f;padding:8px 18px;bord
 button.mini{background:none;border:1px solid var(--line);color:var(--dim);padding:4px 10px;border-radius:6px;cursor:pointer}
 input,textarea{background:#111827;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:8px 10px;width:100%;font:inherit}
 textarea{min-height:90px;resize:vertical}
+textarea.code{font-family:Consolas,"Courier New",monospace;font-size:13.5px;line-height:1.6;min-height:170px;tab-size:4;white-space:pre;resize:vertical}
 .ex{border-left:3px solid var(--acc);padding:10px 14px;margin:12px 0;background:#151c2b;border-radius:0 8px 8px 0}
 .tag{font-size:12px;color:var(--dim);border:1px solid var(--line);padding:1px 8px;border-radius:99px;margin-left:6px}
 .res{margin-top:6px;padding:8px 12px;border-radius:8px}
@@ -531,7 +532,7 @@ function renderQuiz(si){
     if(e.options&&e.options.length)body=e.options.map((o,j)=>`<label class="kp"><input type="${e.type==='multi_choice'?'checkbox':'radio'}" name="q${i}" value="${"ABCDEFGH"[j]}"> ${"ABCDEFGH"[j]}. ${h(o)}</label>`).join("");
     else if(e.type==="true_false")body=`<label class="kp"><input type="radio" name="q${i}" value="对"> 对</label><label class="kp"><input type="radio" name="q${i}" value="错"> 错</label>`;
     else if(e.type==="fill_blank")body=`<input id="a${i}" placeholder="填入答案">`;
-    else if(e.type==="coding_practice")body=(e.starter_code?`<pre>${h(e.starter_code)}</pre>`:"")+`<textarea id="a${i}" placeholder="粘贴你的实现代码"></textarea>`+(e.hints&&e.hints.length?`<div class="dim">提示：${h(e.hints.join("；"))}</div>`:"")+(e.tests&&e.tests.length?`<button class="mini" onclick="runTests(${si},${i})">▶ 在线测试（${e.tests.length} 条断言）</button><div id="t${i}"></div>`:"")+(e.answer?`<details><summary class="dim">查看完整参考实现</summary><pre>${h(e.answer)}</pre></details>`:"");
+    else if(e.type==="coding_practice")body=`<textarea id="a${i}" class="code" spellcheck="false" placeholder="在此直接编写代码…">${h(e.starter_code||"")}</textarea>`+(e.hints&&e.hints.length?`<div class="dim">提示：${h(e.hints.join("；"))}</div>`:"")+(e.tests&&e.tests.length?`<button class="mini" onclick="runTests(${si},${i})">▶ 在线测试（${e.tests.length} 条断言）</button><div id="t${i}"></div>`:"")+(e.answer?`<details><summary class="dim">查看完整参考实现</summary><pre>${h(e.answer)}</pre></details>`:"");
     else body=`<textarea id="a${i}" placeholder="写下你的回答，AI 对照参考答案点评"></textarea>`+(e.answer?`<details><summary class="dim">查看参考答案</summary><pre>${h(e.answer)}</pre></details>`:"");
     return `<div class="ex"><b>${i+1}.</b> ${h(e.question)}<span class="tag">${t}·${e.difficulty||""}</span>${body}<div id="r${i}"></div></div>`;
   }).join("");
@@ -589,6 +590,13 @@ setInterval(()=>{api("/api/run/status").then(s=>{
   if(s.log)el.textContent=s.log;
   if(!s.running&&s.result){const r=s.result;el.innerHTML=r.ok?`<span class="ok">✅ 完成：${h(r.title)}（${r.score} 分）</span> <a href="#" onclick="loadCourses();show('courses');return false">刷新课程列表</a>`:`<span class="bad">❌ ${h(r.error||"失败")}</span>`}
 }).catch(()=>{})},4000);
+document.addEventListener("keydown",(ev)=>{
+  if(ev.key!=="Tab"||!ev.target||!ev.target.classList||!ev.target.classList.contains("code"))return;
+  ev.preventDefault();
+  const t=ev.target,s=t.selectionStart,en=t.selectionEnd;
+  t.value=t.value.slice(0,s)+"    "+t.value.slice(en);
+  t.selectionStart=t.selectionEnd=s+4;
+});
 loadCourses();
 </script></body></html>
 """
