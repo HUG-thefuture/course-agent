@@ -245,7 +245,7 @@ class TestOrchestrator(unittest.TestCase):
         result = self._run(MockLLM())
         with tempfile.TemporaryDirectory() as td:
             files = write_all(result, td)
-            for name in ("notes.md", "key_nodes.md", "exercises.md",
+            for name in ("review.md", "notes.md", "key_nodes.md", "exercises.md",
                          "review_report.md", "plan.json", "sections.json",
                          "session.json"):
                 self.assertIn(name, files)
@@ -256,6 +256,11 @@ class TestOrchestrator(unittest.TestCase):
             self.assertIn("编程实战", ex)
             self.assertIn("验收要点", ex)
             self.assertIn("起始代码", ex)
+            # 复习笔记：知识点结构化（概念/示例/易错点/相关拓展）
+            rv = Path(files["review.md"]).read_text(encoding="utf-8")
+            self.assertIn("复习笔记", rv)
+            self.assertIn("概念讲解", rv)
+            self.assertIn("相关拓展", rv)
             notes = Path(files["notes.md"]).read_text(encoding="utf-8")
             self.assertIn("知识点", notes)
 

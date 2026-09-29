@@ -30,7 +30,8 @@ python main.py run --input https://课程回放页 --password 页面密码
 
 | 文件 | 内容 |
 | --- | --- |
-| `notes.md` | 知识点笔记（带时间戳定位、学习目标、关键节点表） |
+| `review.md` | **复习笔记（主文档）**：每个知识点含完整概念讲解、代码示例、易错点，文末附相关性拓展（课程外关联知识，已标注）——不回看视频也能复习掌握 |
+| `notes.md` | 原始笔记（含时间戳定位、学习目标、关键节点表） |
 | `key_nodes.md` | 关键节点速查表（重点演示 / 易错点 / 面试高频 / 作业布置…） |
 | `exercises.md` | 配套习题：单选/多选/判断/填空/简答 + **编程实战题**（任务描述、起始代码骨架、思路提示在题目区；参考实现与验收要点清单在文末），题目在前、答案在后 |
 | `sections.json` / `plan.json` | 结构化数据（可自建 Anki / 复习系统对接） |
@@ -186,6 +187,14 @@ python main.py improve --input examples/sample_lecture.txt --rounds 3
 python main.py rate --session <会话ID> --section <章节名> --score 4 --note "习题偏简单"
 # 想真正微调模型？把范例库一键导出为 Alpaca 格式，接入 LLaMA-Factory / PEFT 做 LoRA：
 python main.py export-sft --out data/sft.jsonl
+```
+
+### 存量课程升级复习笔记
+
+早期批次的笔记结构较旧时，可按原章节边界重生成复习笔记（不重新出题）：
+
+```bash
+python tools/regen_review.py --output "output/特训营全部课程" --transcripts data/harvest_transcripts
 ```
 
 ## 七、测试

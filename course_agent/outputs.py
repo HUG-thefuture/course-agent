@@ -29,6 +29,45 @@ def _w(path: Path, text: str) -> None:
         f.write(text)
 
 
+def _review_md(result: SessionResult) -> str:
+    """复习笔记（主文档）：概念+示例+易错点+相关性拓展，独立于视频可复习。"""
+    lines = [f"# {result.title} · 复习笔记", "",
+             "> 本文目标：**不回看视频也能复习掌握**。每个知识点含概念讲解、示例、易错点；",
+             "> 文末的「相关拓展」是课程内容之外的关联知识补充，已明确标注。", ""]
+    for sec in result.sections:
+        lines.append(f"## {sec.title}")
+        if sec.goals:
+            lines.append(f"*学习目标：{'；'.join(sec.goals)}*")
+        lines.append("")
+        if not sec.knowledge_points:
+            lines.append("（本章无知识点）")
+        for i, kp in enumerate(sec.knowledge_points, 1):
+            ts = f"（课程 {kp.time} 前后）" if kp.time else ""
+            lines.append(f"### {i}. {kp.title}{ts}")
+            lines.append("")
+            lines.append(f"**概念讲解**：{kp.concept or kp.detail}")
+            lines.append("")
+            if kp.example:
+                lines.append("**示例**：")
+                lines.append("```")
+                lines.append(kp.example.strip())
+                lines.append("```")
+                lines.append("")
+            if kp.pitfall:
+                lines.append(f"**⚠️ 易错点**：{kp.pitfall}")
+                lines.append("")
+        if sec.expansions:
+            lines.append(f"### 📌 相关拓展（课程外补充，共 {len(sec.expansions)} 条）")
+            lines.append("")
+            for e in sec.expansions:
+                lines.append(f"- **{e.topic}**：{e.content}")
+            lines.append("")
+        lines.append("---")
+        lines.append("")
+    lines.append("*拓展内容基于模型知识补充，学习时以课程与官方文档为准。*")
+    return "\n".join(lines)
+
+
 def _notes_md(result: SessionResult) -> str:
     lines = [f"# {result.title} · 知识点笔记", "",
              f"> 来源：{result.source}  ", f"> 会话：{result.session_id}  ",
@@ -151,6 +190,7 @@ def write_all(result: SessionResult, outdir: str | Path) -> dict[str, str]:
                 shutil.copy2(src, frames_dir / src.name)
         files["frames/"] = str(frames_dir)
 
+    put("review.md", _review_md(result))
     put("notes.md", _notes_md(result))
     put("key_nodes.md", _key_nodes_md(result))
     put("exercises.md", _exercises_md(result))

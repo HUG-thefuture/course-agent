@@ -118,13 +118,22 @@ class MockLLM(BaseLLM):
                 "title": f"{title}·要点{i + 1}",
                 "detail": s,
                 "time": start if (has_ts and i == 0) else "",
+                "concept": f"{s}。该知识点的定义、原理与使用场景如下：先把概念吃透，"
+                           f"再结合课程示例动手练习，最后对照易错点自查。",
+                "example": f"// {title} 最小示例\nconsole.log('demo')",
+                "pitfall": "常见误区：只记结论不理解原理；实际使用时注意边界条件。" if i == 0 else "",
             })
         key_nodes = [
             {"label": "重点讲解开始", "why": picked[0][:40], "time": start if has_ts else ""},
             {"label": "本节小结", "why": "讲师对本节要点做归纳，适合回看", "time": ""},
         ]
-        return json.dumps({"knowledge_points": kps, "key_nodes": key_nodes},
-                          ensure_ascii=False)
+        expansions = [
+            {"topic": f"{title}的关联知识",
+             "content": "与本章主题强相关的延伸概念：建议在掌握课程内容后，"
+                        "对照官方文档系统学习相邻知识点，形成知识网络。"}
+        ]
+        return json.dumps({"knowledge_points": kps, "key_nodes": key_nodes,
+                           "expansions": expansions}, ensure_ascii=False)
 
     def _exercises(self, user: str) -> str:
         title = _field(user, "章节标题") or "本节"

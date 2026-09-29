@@ -287,9 +287,11 @@ class Handler(BaseHTTPRequestHandler):
                     if (d / "review_report.md").is_file() else ""
                 notes = (d / "notes.md").read_text(encoding="utf-8") \
                     if (d / "notes.md").is_file() else ""
+                review = (d / "review.md").read_text(encoding="utf-8") \
+                    if (d / "review.md").is_file() else ""
                 return self._json({"id": _course_id(self.cfg, d), "session": session,
                                    "sections": sections, "notes": notes,
-                                   "report": report,
+                                   "review": review, "report": report,
                                    "progress": _load_progress(self.cfg, _course_id(self.cfg, d))})
             if u.path == "/api/progress":
                 cid = (q.get("course") or [""])[0]
@@ -453,9 +455,10 @@ async function openCourse(id){
   <div class="card"><h2 style="margin:0 0 6px">${h(s.title)}</h2>
   <span class="${s.passed?'ok':'bad'}">质检${s.passed?'通过':'未过'} ${s.qa_score} 分</span>
   <span class="dim"> · ${s.sections} 章 · ${s.exercises} 题</span></div>
+  <div class="card"><h3>📖 复习笔记（概念+示例+易错点+相关拓展）</h3><pre id="review-pre">${h(DATA.review||"（本课程暂无复习笔记，可用 tools/regen_review.py 生成）")}</pre></div>
   <div class="card"><h3>📝 习题练习（逐章作答，交卷自动判分）</h3><div id="quiz"></div>
   <div id="quiz-nav"></div><div id="quiz-sum" class="dim"></div></div>
-  <div class="card"><h3>🗒️ 知识点笔记</h3><pre>${h(DATA.notes)}</pre></div>
+  <div class="card"><h3>🗒️ 原始笔记（含时间戳回看定位）</h3><pre>${h(DATA.notes)}</pre></div>
   <div class="card"><h3>🔍 质检报告</h3><pre>${h(DATA.report)}</pre></div>`;
   show("course");renderQuiz(0);
 }

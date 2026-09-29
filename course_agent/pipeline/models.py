@@ -65,6 +65,17 @@ class KnowledgePoint:
     title: str
     detail: str
     time: str = ""
+    concept: str = ""   # 完整概念讲解（复习主文档用）
+    example: str = ""   # 代码/操作示例
+    pitfall: str = ""   # 易错点/常见误区
+
+
+@dataclass
+class Expansion:
+    """相关性拓展：课程内容之外、但强相关的知识补充（明确标注为拓展）。"""
+
+    topic: str
+    content: str
 
 
 @dataclass
@@ -115,17 +126,22 @@ class SectionOutput:
     exercises: list[Exercise] = field(default_factory=list)
     source_excerpt: str = ""  # 源文本摘要，用于范例沉淀
     source_text: str = ""     # 完整源文本，供忠实度抽查对照证据
+    expansions: list[Expansion] = field(default_factory=list)  # 相关性拓展
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "title": self.title,
             "goals": list(self.goals),
             "knowledge_points": [
-                {"title": k.title, "detail": k.detail, "time": k.time}
+                {"title": k.title, "detail": k.detail, "time": k.time,
+                 "concept": k.concept, "example": k.example, "pitfall": k.pitfall}
                 for k in self.knowledge_points
             ],
             "key_nodes": [
                 {"label": n.label, "why": n.why, "time": n.time} for n in self.key_nodes
+            ],
+            "expansions": [
+                {"topic": e.topic, "content": e.content} for e in self.expansions
             ],
             "exercises": [e.to_dict() for e in self.exercises],
         }

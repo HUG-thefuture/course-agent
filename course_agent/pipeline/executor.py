@@ -38,7 +38,7 @@ def _render_notes_retry(extra_err: str) -> str:
     return f"【修正要求】你上一次的输出不符合要求：{extra_err}，请严格按 JSON 格式重新输出。" if extra_err else ""
 
 
-def _parse_notes(data) -> tuple[list[KnowledgePoint], list[KeyNode]]:
+def _parse_notes(data) -> tuple[list[KnowledgePoint], list[KeyNode], list]:
     if not isinstance(data, dict):
         raise ValueError("输出必须是 JSON 对象")
     kps_raw = data.get("knowledge_points")
@@ -50,12 +50,20 @@ def _parse_notes(data) -> tuple[list[KnowledgePoint], list[KeyNode]]:
         if not isinstance(item, dict):
             continue
         detail = str(item.get("detail", "")).strip()
+        concept = str(item.get("concept", "")).strip()
         title = str(item.get("title", "")).strip()
-        if not detail:
+        # 兼容新旧两种输出：concept 优先，退回 detail
+        body = concept or detail
+        if not body:
             continue
-        kps.append(KnowledgePoint(title=title or truncate(detail, 16),
-                                  detail=detail,
-                                  time=str(item.get("time", "") or "")))
+        kps.append(KnowledgePoint(
+            title=title or truncate(body, 16),
+            detail=detail or truncate(concept, 120),
+            time=str(item.get("time", "") or ""),
+            concept=body,
+            example=str(item.get("example", "") or ""),
+            pitfall=str(item.get("pitfall", "") or ""),
+        ))
     if not kps:
         raise ValueError("未解析出有效知识点")
     nodes: list[KeyNode] = []
@@ -67,7 +75,17 @@ def _parse_notes(data) -> tuple[list[KnowledgePoint], list[KeyNode]]:
         if label:
             nodes.append(KeyNode(label=label, why=why,
                                  time=str(item.get("time", "") or "")))
-    return kps, nodes
+    # 相关性拓展（课程外补充，文档中明确标注）
+    from ..pipeline.models import Expansion
+    expansions: list = []
+    for item in (data.get("expansions") or [])[:4]:
+        if not isinstance(item, dict):
+            continue
+        topic = str(item.get("topic", "")).strip()
+        content = str(item.get("content", "")).strip()
+        if topic and content:
+            expansions.append(Expansion(topic=topic, content=content))
+    return kps, nodes, expansions
 
 
 def _parse_exercises(data) -> tuple[list[Exercise], list[str]]:
@@ -135,9 +153,10 @@ def generate_section(llm: BaseLLM, course_title: str, psec: PlanSection,
         for i in psec.chunk_indices if chunks[i].start_time is not None)
     exemplars = _exemplar_block(memory, psec.title + " " + text[:200])
 
-    # ---- 知识点 + 关键节点 ----
+    # ---- 知识点 + 关键节点 + 相关拓展 ----
     kps: list[KnowledgePoint] = []
     nodes: list[KeyNode] = []
+    expansions: list = []
     last_err = ""
     for attempt in range(MAX_PARSE_TRIES):
         prompt = render(
@@ -149,7 +168,7 @@ def generate_section(llm: BaseLLM, course_title: str, psec: PlanSection,
         ) + _render_notes_retry(last_err)
         try:
             raw = llm.chat(prompt, "请只输出 JSON。")
-            kps, nodes = _parse_notes(extract_json(raw))
+            kps, nodes, expansions = _parse_notes(extract_json(raw))
             break
         except (ValueError, TypeError) as e:
             last_err = str(e)
@@ -200,4 +219,5 @@ def generate_section(llm: BaseLLM, course_title: str, psec: PlanSection,
         title=psec.title, goals=list(psec.goals),
         knowledge_points=kps, key_nodes=nodes, exercises=exercises,
         source_excerpt=text[:600], source_text=text,
+        expansions=expansions,
     )
