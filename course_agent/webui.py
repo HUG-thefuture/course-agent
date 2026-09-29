@@ -250,6 +250,39 @@ def run_code_tests(code: str, tests: list[str], language: str,
             "passed": passed, "total": len(results)}
 
 
+def _backfill_tests(llm, exercise: dict) -> dict:
+    """为没有 tests 的存量编程题现场生成在线测试断言。"""
+    from .utils import extract_json
+
+    prompt = (
+        "根据编程题与其参考实现，生成在线测试断言。只输出 JSON："
+        '{"language": "python|javascript|other", '
+        '"tests": ["每条一行可独立执行的断言，python 用 assert，javascript 用 assert(条件)", ...]}'
+        "要求：2~4 条，覆盖正常与边界情况；断言基于题干规定的函数名与参考实现语义；"
+        "若题目是框架/页面类无法断言验证，language 为 other 且 tests 为空数组。\n\n"
+        f"【题目】{exercise.get('question', '')}\n"
+        f"【参考实现】\n{exercise.get('answer', '')}\n"
+        f"【验收要点】{json.dumps(exercise.get('check_points') or [], ensure_ascii=False)}\n"
+    )
+    raw = llm.chat(prompt, "请只输出 JSON。", temperature=0.2, max_tokens=512)
+    data = extract_json(raw)
+    lang = data.get("language")
+    tests = [str(t).strip() for t in data.get("tests") or [] if str(t).strip()]
+    return {"language": lang if lang in ("python", "javascript", "other") else "other",
+            "tests": tests[:4]}
+
+
+def _course_titles_override(cfg: AgentConfig) -> dict:
+    """课程显示名覆盖表（由 tools/rename_courses.py 生成）。"""
+    p = Path(cfg.data_dir) / "course_titles.json"
+    if p.is_file():
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
 # ------------------------------------------------------------------ 进度存取
 def _progress_path(cfg: AgentConfig, cid: str) -> Path:
     return Path(cfg.data_dir) / "webui_progress" / (re.sub(r"[^\w.-]", "_", cid) + ".json")
@@ -314,12 +347,14 @@ class Handler(BaseHTTPRequestHandler):
             if u.path in ("/", "/index.html"):
                 return self._html(INDEX_HTML)
             if u.path == "/api/courses":
+                overrides = _course_titles_override(self.cfg)
                 rows = []
                 for d in _course_dirs(self.cfg):
                     try:
                         s = json.loads((d / "session.json").read_text(encoding="utf-8"))
-                        rows.append({"id": _course_id(self.cfg, d),
-                                     "title": s.get("title", d.name),
+                        cid = _course_id(self.cfg, d)
+                        rows.append({"id": cid,
+                                     "title": overrides.get(cid) or s.get("title", d.name),
                                      "passed": s.get("passed", False),
                                      "score": s.get("qa_score", 0),
                                      "sections": s.get("sections", 0),
@@ -362,11 +397,51 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/grade":
                 return self._json(self._handle_grade(body))
             if u.path == "/api/run_tests":
+                cid = str(body.get("course") or "")
+                try:
+                    si = int(body.get("section", 0))
+                    idx = int(body.get("idx", 0))
+                except (TypeError, ValueError):
+                    return self._json({"error": "section/idx 需为整数"}, 400)
                 code = str(body.get("code") or "")
-                tests = [str(t) for t in body.get("tests") or []]
-                lang = str(body.get("language") or "")
-                if not code.strip() or not tests:
-                    return self._json({"error": "code 与 tests 不能为空"}, 400)
+                d = _find_course(self.cfg, cid)
+                ex: dict = {}
+                if d and (d / "sections.json").is_file():
+                    try:
+                        secs = json.loads((d / "sections.json").read_text(encoding="utf-8"))
+                        if 0 <= si < len(secs):
+                            exs = secs[si].get("exercises") or []
+                            if 0 <= idx < len(exs):
+                                ex = exs[idx]
+                    except (json.JSONDecodeError, OSError):
+                        pass
+                tests = [str(t) for t in ex.get("tests") or []]
+                lang = str(ex.get("language") or "")
+                if not tests or not lang:
+                    # 存量编程题缺测试断言：现场生成并回写缓存
+                    try:
+                        back = _backfill_tests(self.llm, ex or {
+                            "question": str(body.get("question") or ""),
+                            "answer": str(body.get("answer") or "")})
+                        tests, lang = back["tests"], back["language"]
+                        if ex and d and (d / "sections.json").is_file() and tests:
+                            secs = json.loads((d / "sections.json").read_text(encoding="utf-8"))
+                            exs = secs[si].get("exercises") or []
+                            if 0 <= idx < len(exs):
+                                exs[idx]["tests"] = tests
+                                exs[idx]["language"] = lang
+                                (d / "sections.json").write_text(
+                                    json.dumps(secs, ensure_ascii=False, indent=2),
+                                    encoding="utf-8")
+                    except (LLMError, ValueError) as e:
+                        return self._json({"runnable": False,
+                                           "reason": f"生成测试失败：{truncate(str(e), 120)}，"
+                                                     "可交卷后由 AI 评审"})
+                if not code.strip():
+                    return self._json({"error": "请先在代码区编写实现"}, 400)
+                if not tests:
+                    return self._json({"runnable": False,
+                                       "reason": "该题无法自动断言，请交卷后由 AI 评审"})
                 return self._json(run_code_tests(code, tests, lang))
             if u.path == "/api/progress":
                 cid = body.get("course", "")
@@ -463,7 +538,10 @@ button.pri{background:var(--acc);border:none;color:#08101f;padding:8px 18px;bord
 button.mini{background:none;border:1px solid var(--line);color:var(--dim);padding:4px 10px;border-radius:6px;cursor:pointer}
 input,textarea{background:#111827;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:8px 10px;width:100%;font:inherit}
 textarea{min-height:90px;resize:vertical}
-textarea.code{font-family:Consolas,"Courier New",monospace;font-size:13.5px;line-height:1.6;min-height:170px;tab-size:4;white-space:pre;resize:vertical}
+textarea.code{font-family:Consolas,"Courier New",monospace;font-size:13.5px;line-height:1.6;min-height:170px;tab-size:4;white-space:pre;resize:vertical;border:none;border-radius:0}
+.editor{display:flex;background:#0d1117;border:1px solid var(--line);border-radius:8px;overflow:hidden;margin:8px 0}
+.editor .gutter{margin:0;padding:10px 8px 10px 12px;color:#5a6a85;background:#0d1117;text-align:right;user-select:none;font-family:Consolas,"Courier New",monospace;font-size:13.5px;line-height:1.6;min-width:36px;white-space:pre;overflow:hidden}
+.editor textarea.code{flex:1;min-height:170px}
 .ex{border-left:3px solid var(--acc);padding:10px 14px;margin:12px 0;background:#151c2b;border-radius:0 8px 8px 0}
 .tag{font-size:12px;color:var(--dim);border:1px solid var(--line);padding:1px 8px;border-radius:99px;margin-left:6px}
 .res{margin-top:6px;padding:8px 12px;border-radius:8px}
@@ -515,11 +593,11 @@ async function openCourse(id){
   <div class="card"><h2 style="margin:0 0 6px">${h(s.title)}</h2>
   <span class="${s.passed?'ok':'bad'}">质检${s.passed?'通过':'未过'} ${s.qa_score} 分</span>
   <span class="dim"> · ${s.sections} 章 · ${s.exercises} 题</span></div>
-  <div class="card"><h3>📖 复习笔记（概念+示例+易错点+相关拓展）</h3><pre id="review-pre">${h(DATA.review||"（本课程暂无复习笔记，可用 tools/regen_review.py 生成）")}</pre></div>
   <div class="card"><h3>📝 习题练习（逐章作答，交卷自动判分）</h3><div id="quiz"></div>
   <div id="quiz-nav"></div><div id="quiz-sum" class="dim"></div></div>
+  <div class="card"><h3>🔍 质检报告</h3><pre>${h(DATA.report)}</pre></div>
   <div class="card"><h3>🗒️ 原始笔记（含时间戳回看定位）</h3><pre>${h(DATA.notes)}</pre></div>
-  <div class="card"><h3>🔍 质检报告</h3><pre>${h(DATA.report)}</pre></div>`;
+  <div class="card"><h3>📖 复习笔记（练习完成后用来巩固：概念+示例+易错点+相关拓展）</h3><pre id="review-pre">${h(DATA.review||"（本课程暂无复习笔记，可用 tools/regen_review.py 生成）")}</pre></div>`;
   show("course");renderQuiz(0);
 }
 let QIDX=0;
@@ -532,16 +610,35 @@ function renderQuiz(si){
     if(e.options&&e.options.length)body=e.options.map((o,j)=>`<label class="kp"><input type="${e.type==='multi_choice'?'checkbox':'radio'}" name="q${i}" value="${"ABCDEFGH"[j]}"> ${"ABCDEFGH"[j]}. ${h(o)}</label>`).join("");
     else if(e.type==="true_false")body=`<label class="kp"><input type="radio" name="q${i}" value="对"> 对</label><label class="kp"><input type="radio" name="q${i}" value="错"> 错</label>`;
     else if(e.type==="fill_blank")body=`<input id="a${i}" placeholder="填入答案">`;
-    else if(e.type==="coding_practice")body=`<textarea id="a${i}" class="code" spellcheck="false" placeholder="在此直接编写代码…">${h(e.starter_code||"")}</textarea>`+(e.hints&&e.hints.length?`<div class="dim">提示：${h(e.hints.join("；"))}</div>`:"")+(e.tests&&e.tests.length?`<button class="mini" onclick="runTests(${si},${i})">▶ 在线测试（${e.tests.length} 条断言）</button><div id="t${i}"></div>`:"")+(e.answer?`<details><summary class="dim">查看完整参考实现</summary><pre>${h(e.answer)}</pre></details>`:"");
+    else if(e.type==="coding_practice")body=`<div class="editor"><pre class="gutter" id="g${i}">1</pre><textarea id="a${i}" class="code" spellcheck="false" placeholder="在此直接编写代码…">${h(e.starter_code||"")}</textarea></div>`+(e.hints&&e.hints.length?`<div class="dim">提示：${h(e.hints.join("；"))}</div>`:"")+`<button class="mini" onclick="runTests(${si},${i})">▶ 在线测试</button><div id="t${i}"></div>`+(e.answer?`<details><summary class="dim">查看完整参考实现</summary><pre>${h(e.answer)}</pre></details>`:"");
     else body=`<textarea id="a${i}" placeholder="写下你的回答，AI 对照参考答案点评"></textarea>`+(e.answer?`<details><summary class="dim">查看参考答案</summary><pre>${h(e.answer)}</pre></details>`:"");
     return `<div class="ex"><b>${i+1}.</b> ${h(e.question)}<span class="tag">${t}·${e.difficulty||""}</span>${body}<div id="r${i}"></div></div>`;
   }).join("");
   $("#quiz-nav").innerHTML=`<button class="pri" onclick="submitQuiz(${si})">交卷判分</button>
-   ${si>0?`<button class="mini" onclick="renderQuiz(${si-1})">上一章</button>`:""}
-   ${si<DATA.sections.length-1?`<button class="mini" onclick="nextQuiz(${si})">下一章（先交卷）</button>`:""}`;
+   ${si>0?`<button class="mini" onclick="gotoQuiz(${si},${si-1})">◀ 上一章</button>`:""}
+   ${si<DATA.sections.length-1?`<button class="mini" onclick="gotoQuiz(${si},${si+1})">下一章 ▶</button>`:""}
+   <span class="dim">第 ${si+1}/${DATA.sections.length} 章 · 切换时自动暂存本章作答</span>`;
   $("#quiz-sum").textContent="";
+  DATA.sections[si].exercises.forEach((e,i)=>{if(e.type==="coding_practice")setupEditor(i)});
 }
-function nextQuiz(si){submitQuiz(si,true)}
+function setupEditor(i){
+  const t=document.getElementById("a"+i),g=document.getElementById("g"+i);
+  if(!t||!g)return;
+  const upd=()=>{const n=t.value.split("\n").length;g.textContent=Array.from({length:n},(_,k)=>k+1).join("\n")};
+  t.addEventListener("input",upd);
+  t.addEventListener("scroll",()=>{g.scrollTop=t.scrollTop});
+  upd();
+}
+async function gotoQuiz(cur,n){
+  if(n<0||!DATA.sections[n])return;
+  try{ // 静默暂存本章作答，切换不丢
+    const rows=collect(cur);const sec={};
+    rows.forEach((a,i)=>{sec[i]={user:a}});
+    await api("/api/progress",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({course:COURSE,data:{sections:{[String(cur)]:sec}}})});
+  }catch(e){}
+  renderQuiz(n);
+}
 function collect(si){
   return (DATA.sections[si].exercises||[]).map((e,i)=>{
     // 选择类（单选/多选/判断）统一读 checked 项，判断题的 radio 也走这里
