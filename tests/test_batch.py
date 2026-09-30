@@ -113,6 +113,45 @@ class TestRunBatch(unittest.TestCase):
                          force=True)
         self.assertEqual(out3[0].status, "passed")
 
+    def test_retry_until_pass_recovers_failures(self):
+        # 前 15 次调用返回垃圾（覆盖首轮的 3 次完整尝试），之后恢复：
+        # 持续迭代轮应让课程从 failed 转为 passed
+        from course_agent.llm import MockLLM
+
+        class _Recovering:
+            name = "recovering"
+
+            def __init__(self, bad_calls, inner):
+                self.bad = bad_calls
+                self.inner = inner
+
+            def chat(self, system, user, **kw):
+                if self.bad > 0:
+                    self.bad -= 1
+                    return "这不是合法输出"
+                return self.inner.chat(system, user, **kw)
+
+        self.cfg.pipeline.retry_until_pass = 1
+        out = run_batch(_Recovering(15, MockLLM()), self.cfg,
+                        [BatchItem(str(EXAMPLE_TXT), "课程甲")],
+                        out_root=self.td / "out5")
+        report = json.loads((self.td / "out5" / "batch_report.json")
+                            .read_text(encoding="utf-8"))
+        self.assertEqual(report["retry_rounds"], 1)
+        final = [o for o in report["outcomes"] if o["title"] == "课程甲"][0]
+        self.assertEqual(final["status"], "passed")
+
+    def test_retry_gives_up_after_rounds(self):
+        from course_agent.llm import MockLLM
+        self.cfg.pipeline.retry_until_pass = 1
+        out = run_batch(MockLLM(fail_plan=999), self.cfg,
+                        [BatchItem("不存在_9x.mp4", "坏课程")],
+                        out_root=self.td / "out5b")
+        self.assertEqual(out[0].status, "failed")
+        report = json.loads((self.td / "out5b" / "batch_report.json")
+                            .read_text(encoding="utf-8"))
+        self.assertEqual(report["retry_rounds"], 1)  # 轮数用尽后停止
+
     def test_transcribe_cache(self):
         import course_agent.batch as batch_mod
         calls = {"n": 0}

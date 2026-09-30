@@ -47,7 +47,7 @@ def grade_objective(exercise: dict, answer: str) -> tuple[bool, str]:
     if not user:
         return False, "未作答"
     if t == "single_choice":
-        opts = [str(o) for o in ex.get("options") or []]
+        opts = [str(o) for o in exercise.get("options") or []]
         u = user.strip().upper()[:1]
         r = ref.strip().upper()
         if len(r) == 1 and r in "ABCDEFGH":
@@ -204,7 +204,7 @@ def _build_llm(cfg: AgentConfig):
         clients.append(OpenAICompatClient(
             base_url=cfg.api.base_url, model=cfg.api.model,
             api_key=cfg.api_key_effective, timeout=cfg.api.timeout,
-            max_retries=cfg.api.max_retries))
+            max_retries=cfg.api.max_retries, extra_body=cfg.api.extra_body))
     return Router(clients)
 
 

@@ -108,16 +108,17 @@ def _parse_exercises(data) -> tuple[list[Exercise], list[str]]:
 
 
 def _generate_coding(llm: BaseLLM, course_title: str, section_title: str,
-                     text: str) -> list:
+                     text: str, pcfg, memory: Memory | None = None) -> list:
     """生成编程实战题：最多重试 1 次，全部失败抛异常由调用方降级。"""
     last_err = ""
+    budget = 8192
     for attempt in range(2):
         prompt = render("coding_practice", title=course_title,
                         section_title=section_title, source_text=text)
         if last_err:
             prompt += f"\n【修正要求】上一次输出问题：{last_err}，请修正后严格按 JSON 重新输出。"
         try:
-            raw = llm.chat(prompt, "请只输出 JSON。", max_tokens=4096)
+            raw = llm.chat(prompt, "请只输出 JSON。", max_tokens=budget)
             coding, problems = _parse_exercises(extract_json(raw))
             if problems:
                 _log.info("章节「%s」编程题 %d 道未通过校验被丢弃",
@@ -125,8 +126,10 @@ def _generate_coding(llm: BaseLLM, course_title: str, section_title: str,
             return coding[:2]
         except (ValueError, TypeError) as e:
             last_err = str(e)
-            _log.warning("编程题生成第 %d 次失败（%s）: %s",
-                         attempt + 1, truncate(section_title, 20), e)
+            if "模型输出为空" in last_err:
+                budget = min(budget * 2, 16384)
+            _log.warning("编程题生成第 %d 次失败（%s, 预算 %d）: %s",
+                         attempt + 1, truncate(section_title, 20), budget, e)
     raise ExecuteError(last_err)
 
 
@@ -158,6 +161,7 @@ def generate_section(llm: BaseLLM, course_title: str, psec: PlanSection,
     nodes: list[KeyNode] = []
     expansions: list = []
     last_err = ""
+    budget = 8192  # 思考型模型的推理段会消耗预算，空输出时自动加倍
     for attempt in range(MAX_PARSE_TRIES):
         prompt = render(
             "notes", title=course_title, section_title=psec.title,
@@ -167,19 +171,22 @@ def generate_section(llm: BaseLLM, course_title: str, psec: PlanSection,
             source_text=text, exemplars=exemplars,
         ) + _render_notes_retry(last_err)
         try:
-            raw = llm.chat(prompt, "请只输出 JSON。", max_tokens=3072)
+            raw = llm.chat(prompt, "请只输出 JSON。", max_tokens=budget)
             kps, nodes, expansions = _parse_notes(extract_json(raw))
             break
         except (ValueError, TypeError) as e:
             last_err = str(e)
-            _log.warning("知识点生成第 %d 次失败（%s）: %s",
-                         attempt + 1, truncate(psec.title, 20), e)
+            if "模型输出为空" in last_err:
+                budget = min(budget * 2, 16384)
+            _log.warning("知识点生成第 %d 次失败（%s, 预算 %d）: %s",
+                         attempt + 1, truncate(psec.title, 20), budget, e)
     else:
         raise ExecuteError(f"章节「{psec.title}」知识点生成失败: {last_err}")
 
     # ---- 习题 ----
     exercises: list[Exercise] = []
     last_err = ""
+    budget = 8192
     for attempt in range(MAX_PARSE_TRIES):
         prompt = render(
             "exercises", title=course_title, section_title=psec.title,
@@ -190,7 +197,7 @@ def generate_section(llm: BaseLLM, course_title: str, psec: PlanSection,
         if last_err:
             prompt += f"\n【修正要求】上一次输出问题：{last_err}，请修正后严格按 JSON 重新输出。"
         try:
-            raw = llm.chat(prompt, "请只输出 JSON。", max_tokens=4096)
+            raw = llm.chat(prompt, "请只输出 JSON。", max_tokens=budget)
             exercises, problems = _parse_exercises(extract_json(raw))
             if problems:
                 _log.info("章节「%s」有 %d 道题未通过校验被丢弃: %s",
@@ -201,15 +208,18 @@ def generate_section(llm: BaseLLM, course_title: str, psec: PlanSection,
             break
         except (ValueError, TypeError) as e:
             last_err = str(e)
-            _log.warning("习题生成第 %d 次失败（%s）: %s",
-                         attempt + 1, truncate(psec.title, 20), e)
+            if "模型输出为空" in last_err:
+                budget = min(budget * 2, 16384)
+            _log.warning("习题生成第 %d 次失败（%s, 预算 %d）: %s",
+                         attempt + 1, truncate(psec.title, 20), budget, e)
     else:
         raise ExecuteError(f"章节「{psec.title}」习题生成失败: {last_err}")
 
     # ---- 编程实战题（独立调用，失败不阻断主流程）----
     if getattr(pcfg, "coding_practice", True):
         try:
-            coding = _generate_coding(llm, course_title, psec.title, text)
+            coding = _generate_coding(llm, course_title, psec.title, text,
+                                      pcfg, memory)
             exercises.extend(coding)
         except Exception as e:  # 增强功能：任何失败都只降级为无编程题
             _log.warning("章节「%s」编程题生成失败（已跳过）: %s",

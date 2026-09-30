@@ -38,6 +38,7 @@ class OpenAICompatClient(BaseLLM):
         timeout: int = 300,
         max_retries: int = 2,
         transport: Optional[Transport] = None,
+        extra_body: Optional[dict] = None,
     ) -> None:
         if not base_url:
             raise LLMError("base_url 不能为空")
@@ -47,6 +48,7 @@ class OpenAICompatClient(BaseLLM):
         self.timeout = timeout
         self.max_retries = max(0, int(max_retries))
         self._transport = transport or _default_transport
+        self.extra_body = dict(extra_body or {})
 
     @property
     def name(self) -> str:
@@ -64,6 +66,8 @@ class OpenAICompatClient(BaseLLM):
             "max_tokens": max_tokens,
             "stream": False,
         }
+        if self.extra_body:
+            payload.update(self.extra_body)
         return self._request(payload)
 
     def chat_with_image(self, system: str, user: str, images: list,

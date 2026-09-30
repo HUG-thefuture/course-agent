@@ -166,29 +166,23 @@ def _material_for_item(item: BatchItem, cfg: AgentConfig) -> Material:
     return m
 
 
-def run_batch(llm: BaseLLM, cfg: AgentConfig, items: list[BatchItem],
-              out_root: str | Path, memory: Memory | None = None,
-              vision_llm: BaseLLM | None = None, force: bool = False,
-              review_llm: BaseLLM | None = None) -> list[BatchOutcome]:
-    """顺序处理全部条目。返回逐项结果；汇总写入 out_root/batch_report.json。"""
-    if not items:
-        raise ValueError("批量列表为空")
-    orch = Orchestrator(llm, cfg, memory=memory, vision_llm=vision_llm,
-                        review_llm=review_llm)
-    out_root = Path(out_root)
-    out_root.mkdir(parents=True, exist_ok=True)
+def _process_items(cfg: AgentConfig, items: list[BatchItem],
+                   out_root: Path, memory: Memory | None,
+                   vision_llm: BaseLLM | None, force: bool,
+                   review_llm: BaseLLM | None, orch: Orchestrator,
+                   label: str, outdir_of) -> list[BatchOutcome]:
+    """处理一批条目（不写报告）。outdir_of(item, index) 返回产物目录。"""
     outcomes: list[BatchOutcome] = []
     total = len(items)
-
     for i, item in enumerate(items, 1):
         title = item.title or _title_from_source(item.source)
-        outdir = out_root / f"{i:02d}-{slugify(title)}"
+        outdir = outdir_of(item, i)
         if not force and (outdir / "session.json").is_file():
-            _log.info("[%d/%d] 跳过（已有产物，--force 可重跑）：%s", i, total, title)
+            _log.info("[%s %d/%d] 跳过（已有产物，--force 可重跑）：%s", label, i, total, title)
             outcomes.append(BatchOutcome(item.source, title, "skipped",
                                          output_dir=str(outdir)))
             continue
-        _log.info("[%d/%d] 开始处理：%s", i, total, title)
+        _log.info("[%s %d/%d] 开始处理：%s", label, i, total, title)
         try:
             material = _material_for_item(item, cfg)
             course_title = item.title or material.title
@@ -201,24 +195,75 @@ def run_batch(llm: BaseLLM, cfg: AgentConfig, items: list[BatchItem],
                 session_id=result.session_id,
                 score=result.qa.score if result.qa else 0,
                 output_dir=str(outdir)))
-            _log.info("[%d/%d] 完成：%s（%s，得分 %d）", i, total, title,
+            _log.info("[%s %d/%d] 完成：%s（%s，得分 %d）", label, i, total, title,
                       outcomes[-1].status, outcomes[-1].score)
         except Exception as e:  # 单项失败不中断整批
-            _log.error("[%d/%d] 处理失败：%s -> %s", i, total, title, e)
+            _log.error("[%s %d/%d] 处理失败：%s -> %s", label, i, total, title, e)
             outcomes.append(BatchOutcome(item.source, title, "failed",
                                          error=truncate(str(e), 300),
                                          output_dir=str(outdir)))
+    return outcomes
+
+
+def run_batch(llm: BaseLLM, cfg: AgentConfig, items: list[BatchItem],
+              out_root: str | Path, memory: Memory | None = None,
+              vision_llm: BaseLLM | None = None, force: bool = False,
+              review_llm: BaseLLM | None = None) -> list[BatchOutcome]:
+    """顺序处理全部条目；失败课程按 retry_until_pass 轮数持续重试直至无问题。
+
+    返回逐项结果（重试后以最新结果为准）；汇总写入 out_root/batch_report.json。
+    """
+    if not items:
+        raise ValueError("批量列表为空")
+    orch = Orchestrator(llm, cfg, memory=memory, vision_llm=vision_llm,
+                        review_llm=review_llm)
+    out_root = Path(out_root)
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    outcomes = _process_items(
+        cfg, items, out_root, memory, vision_llm, force, review_llm, orch,
+        label="首轮",
+        outdir_of=lambda it, i: out_root / f"{i:02d}-{slugify(it.title or _title_from_source(it.source))}")
+
+    # ---- 持续迭代：失败/未达标课程反复重跑，直至全部通过或轮数用尽 ----
+    outcome_map: dict[tuple, BatchOutcome] = {
+        (o.source, o.title): o for o in outcomes}
+    passes_left = max(0, int(cfg.pipeline.retry_until_pass))
+    round_no = 0
+    while passes_left > 0:
+        pending = [(it, outcome_map[(it.source, it.title)])
+                   for it in items
+                   if (it.source, it.title) in outcome_map
+                   and outcome_map[(it.source, it.title)].status
+                   in ("failed", "qa_failed")]
+        if not pending:
+            break
+        round_no += 1
+        passes_left -= 1
+        _log.info("=== 持续迭代第 %d 轮：%d 门未达标，重新生成 ===",
+                  round_no, len(pending))
+        retry_items = [it for it, _ in pending]
+        outdir_map = {(it.source, it.title): Path(om.output_dir)
+                      for it, om in pending}
+        retry_outcomes = _process_items(
+            cfg, retry_items, out_root, memory, vision_llm, force=True,
+            review_llm=review_llm, orch=orch, label=f"迭代{round_no}",
+            outdir_of=lambda it, i: outdir_map[(it.source, it.title)])
+        for ro in retry_outcomes:
+            outcome_map[(ro.source, ro.title)] = ro
+        outcomes = list(outcome_map.values())
 
     counts: dict[str, int] = {}
     for o in outcomes:
         counts[o.status] = counts.get(o.status, 0) + 1
     report = {
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "total": total, **counts,
+        "total": len(items), **counts,
+        "retry_rounds": round_no,
         "outcomes": [asdict(o) for o in outcomes],
     }
     report_path = out_root / "batch_report.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2),
                            encoding="utf-8")
-    _log.info("批量完成：%s，报告 -> %s", counts, report_path)
+    _log.info("批量完成：%s（迭代 %d 轮），报告 -> %s", counts, round_no, report_path)
     return outcomes

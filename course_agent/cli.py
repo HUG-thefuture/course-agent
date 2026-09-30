@@ -198,7 +198,10 @@ def cmd_batch(args: argparse.Namespace) -> int:
     if not items:
         _log.error("没有发现可处理的课程素材（支持目录/清单.txt/清单.json/URL）")
         return 1
-    _log.info("批量计划：%d 个课程素材", len(items))
+    if args.retry_until_pass is not None:
+        cfg.pipeline.retry_until_pass = args.retry_until_pass
+    _log.info("批量计划：%d 个课程素材（失败自动重试 %d 轮）",
+              len(items), cfg.pipeline.retry_until_pass)
     mem = _open_memory(cfg)
     try:
         outcomes = run_batch(llm, cfg, items,
@@ -290,6 +293,8 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--outdir", default="", help="输出根目录（默认 output/batch）")
     batch.add_argument("--mock", action="store_true", help="使用离线 Mock 模型")
     batch.add_argument("--force", action="store_true", help="忽略已有产物强制重跑")
+    batch.add_argument("--retry-until-pass", type=int, default=None,
+                       help="失败课程持续重试轮数（默认取 config pipeline.retry_until_pass）")
     batch.add_argument("--source", choices=["auto", "local", "api"], default="auto")
     common(batch)
 

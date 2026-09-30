@@ -33,6 +33,7 @@ class ApiConfig:
     api_key: str = ""
     timeout: int = 120
     max_retries: int = 2
+    extra_body: dict = field(default_factory=dict)  # 透传给请求体（如关闭思考模式）
 
 
 @dataclass
@@ -62,6 +63,7 @@ class PipelineConfig:
     partial_chars: int = 3000      # 素材总字数低于该值按"不完整课程"处理
     extract_frames: bool = True    # 视频素材是否提取屏幕关键帧存档
     max_frames: int = 24           # 单课程最多提取帧数
+    retry_until_pass: int = 2      # 批量首轮后对失败课程的额外重试轮数（持续迭代直至无问题）
 
 
 @dataclass
