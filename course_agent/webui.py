@@ -47,9 +47,17 @@ def grade_objective(exercise: dict, answer: str) -> tuple[bool, str]:
     if not user:
         return False, "未作答"
     if t == "single_choice":
+        opts = [str(o) for o in ex.get("options") or []]
         u = user.strip().upper()[:1]
-        ok = u == ref.strip().upper()[:1]
-        return ok, f"正确答案 {ref.strip().upper()[:1]}"
+        r = ref.strip().upper()
+        if len(r) == 1 and r in "ABCDEFGH":
+            return u == r, f"正确答案 {r}"
+        # 兼容：模型把答案存成了选项文本而非字母——映射回字母再判
+        for i, o in enumerate(opts):
+            if _norm_text(o) and (_norm_text(o) == _norm_text(ref)
+                                  or _norm_text(ref) in _norm_text(o)):
+                return u == "ABCDEFGH"[i], f"正确答案 {'ABCDEFGH'[i]}"
+        return u == r[:1], f"正确答案 {ref}"
     if t == "multi_choice":
         u = set(re.findall(r"[A-H]", user.upper()))
         r = set(re.findall(r"[A-H]", ref.upper()))

@@ -151,8 +151,14 @@ def fidelity_check(llm: BaseLLM, sections: list[SectionOutput],
             items.append({"kind": "知识点", "content": kp.title + "：" + kp.detail})
         if sec.exercises:
             ex = sec.exercises[0]
-            items.append({"kind": "习题", "content": ex.question,
-                          "answer": ex.answer})
+            item = {"kind": "习题", "content": ex.question, "answer": ex.answer}
+            if ex.type == "single_choice" and ex.options:
+                # 选择题自洽：检查标称答案字母对应的选项是否真的正确
+                item["content"] = (ex.question + " 选项: "
+                                   + "; ".join(f"{l}.{o}" for l, o in
+                                               zip("ABCDEFGH", ex.options)))
+                item["check_answer"] = True
+            items.append(item)
         for i, it in enumerate(items):
             it["idx"] = i
         # 忠实度判断需要完整证据：给裁判全节源文本（截断到提示词安全长度）
