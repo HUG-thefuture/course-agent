@@ -537,6 +537,7 @@ table{width:100%;border-collapse:collapse}td,th{padding:8px 10px;border-bottom:1
 button.pri{background:var(--acc);border:none;color:#08101f;padding:8px 18px;border-radius:8px;cursor:pointer;font-weight:600}
 button.mini{background:none;border:1px solid var(--line);color:var(--dim);padding:4px 10px;border-radius:6px;cursor:pointer}
 input,textarea{background:#111827;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:8px 10px;width:100%;font:inherit}
+input[type=radio],input[type=checkbox]{width:auto;padding:0;accent-color:var(--acc);transform:scale(1.15);vertical-align:middle;margin-right:8px}
 textarea{min-height:90px;resize:vertical}
 textarea.code{font-family:Consolas,"Courier New",monospace;font-size:13.5px;line-height:1.6;min-height:170px;tab-size:4;white-space:pre;resize:vertical;border:none;border-radius:0}
 .editor{display:flex;background:#0d1117;border:1px solid var(--line);border-radius:8px;overflow:hidden;margin:8px 0}
