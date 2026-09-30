@@ -84,9 +84,15 @@ def main() -> int:
 
     cfg = load_config()
     print(f"检测到 Key（{key[:6]}***），冒烟测试 {cfg.api.model} …", flush=True)
-    ok, detail = smoke_test(cfg)
+    ok, detail = False, ""
+    for attempt in range(1, 21):  # 服务商有并发限制，失败自动重试
+        ok, detail = smoke_test(cfg)
+        if ok:
+            break
+        print(f"冒烟第 {attempt} 次失败（{detail}），60 秒后重试", flush=True)
+        time.sleep(60)
     if not ok:
-        print(f"冒烟测试失败：{detail}\n请检查 Key/模型名后重跑本脚本", flush=True)
+        print("冒烟连续失败，退出", flush=True)
         return 1
     print(f"冒烟测试通过：{detail}", flush=True)
 

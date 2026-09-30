@@ -624,7 +624,7 @@ function renderQuiz(si){
 function setupEditor(i){
   const t=document.getElementById("a"+i),g=document.getElementById("g"+i);
   if(!t||!g)return;
-  const upd=()=>{const n=t.value.split("\n").length;g.textContent=Array.from({length:n},(_,k)=>k+1).join("\n")};
+  const upd=()=>{const n=t.value.split("\\n").length;g.textContent=Array.from({length:n},(_,k)=>k+1).join("\\n")};
   t.addEventListener("input",upd);
   t.addEventListener("scroll",()=>{g.scrollTop=t.scrollTop});
   upd();
