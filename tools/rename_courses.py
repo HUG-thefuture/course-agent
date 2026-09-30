@@ -33,7 +33,7 @@ def suggest_title(llm, source_text: str, current: str) -> str:
         f"【当前名称】{current}\n"
         f"【笔记开头】\n{truncate(source_text, 900)}\n"
     )
-    raw = llm.chat(prompt, "请只输出 JSON。", temperature=0.2, max_tokens=128)
+    raw = llm.chat(prompt, "请只输出 JSON。", temperature=0.2, max_tokens=1024)
     data = extract_json(raw)
     title = str(data.get("title", "")).strip()
     return truncate(title, 30) if title else ""

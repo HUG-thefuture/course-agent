@@ -106,7 +106,7 @@ def grade_subjective(llm, exercise: dict, user_answer: str) -> dict:
     from .utils import extract_json
 
     raw = llm.chat(_subjective_prompt(exercise, user_answer),
-                   "请只输出评分 JSON。", temperature=0.2, max_tokens=512)
+                   "请只输出评分 JSON。", temperature=0.2, max_tokens=1024)
     data = extract_json(raw)
     score = int(data.get("score", 0))
     verdict = str(data.get("verdict", "未掌握"))
@@ -308,7 +308,7 @@ def _backfill_tests(llm, exercise: dict, starter_code: str = "",
         f"【参考实现】\n{exercise.get('answer', '')}\n"
         f"【验收要点】{json.dumps(exercise.get('check_points') or [], ensure_ascii=False)}\n"
     )
-    raw = llm.chat(prompt, "请只输出 JSON。", temperature=0.2, max_tokens=512)
+    raw = llm.chat(prompt, "请只输出 JSON。", temperature=0.2, max_tokens=1024)
     data = extract_json(raw)
     lang = data.get("language")
     tests = [str(t).strip() for t in data.get("tests") or [] if str(t).strip()]

@@ -39,7 +39,7 @@ def check_choice(llm, ex: dict) -> str | None:
         "注意：如果多个选项都含正确表述，选表述最准确、最完整的一个；"
         "如果题目本身有问题（无正确选项），answer 填 \"?\"。"
     )
-    raw = llm.chat(prompt, "请只输出 JSON。", temperature=0, max_tokens=64)
+    raw = llm.chat(prompt, "请只输出 JSON。", temperature=0, max_tokens=1024)
     data = extract_json(raw)
     ans = str(data.get("answer", "")).strip().upper()[:1]
     return ans if ans in _LETTERS else None
