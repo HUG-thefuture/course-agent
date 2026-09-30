@@ -201,6 +201,32 @@ def _build_llm(cfg: AgentConfig):
 
 
 # ------------------------------------------------------------------ 在线测试
+def _code_names(code: str) -> set[str]:
+    """静态分析用户代码：返回顶层函数名集合（断言在模块层调用，只看得到这些）。"""
+    import ast
+    defined: set[str] = set()
+    try:
+        tree = ast.parse(code)
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defined.add(node.name)
+    except (SyntaxError, ValueError):
+        pass
+    return defined
+
+
+def _test_called_names(tests: list[str]) -> set[str]:
+    called: set[str] = set()
+    for t in tests:
+        for m in re.finditer(r"([A-Za-z_]\w*)\s*\(", t):
+            name = m.group(1)
+            if name not in ("assert", "print", "isinstance", "len", "range",
+                            "str", "int", "float", "list", "dict", "set",
+                            "abs", "round", "sorted", "Exception"):
+                called.add(name)
+    return called
+
+
 def run_code_tests(code: str, tests: list[str], language: str,
                    timeout: int = 10) -> dict:
     """编程题在线测试：把用户代码与每条断言拼接后真实执行。
@@ -250,16 +276,26 @@ def run_code_tests(code: str, tests: list[str], language: str,
             "passed": passed, "total": len(results)}
 
 
-def _backfill_tests(llm, exercise: dict) -> dict:
-    """为没有 tests 的存量编程题现场生成在线测试断言。"""
+def _backfill_tests(llm, exercise: dict, starter_code: str = "",
+                    user_code: str = "") -> dict:
+    """为没有 tests 的存量编程题现场生成在线测试断言。
+
+    user_code 非空时（重生成模式），断言必须调用学生代码里实际定义的函数名。
+    """
     from .utils import extract_json
 
+    anchor = ""
+    if user_code.strip():
+        anchor = f"\n【学生当前代码（tests 必须调用其中实际定义的函数名）】\n{truncate(user_code, 800)}\n"
+    elif starter_code.strip():
+        anchor = f"\n【代码骨架（tests 须与其中的函数名一致）】\n{truncate(starter_code, 600)}\n"
     prompt = (
         "根据编程题与其参考实现，生成在线测试断言。只输出 JSON："
         '{"language": "python|javascript|other", '
         '"tests": ["每条一行可独立执行的断言，python 用 assert，javascript 用 assert(条件)", ...]}'
         "要求：2~4 条，覆盖正常与边界情况；断言基于题干规定的函数名与参考实现语义；"
-        "若题目是框架/页面类无法断言验证，language 为 other 且 tests 为空数组。\n\n"
+        "若题目是框架/页面类无法断言验证，language 为 other 且 tests 为空数组。\n"
+        f"{anchor}\n"
         f"【题目】{exercise.get('question', '')}\n"
         f"【参考实现】\n{exercise.get('answer', '')}\n"
         f"【验收要点】{json.dumps(exercise.get('check_points') or [], ensure_ascii=False)}\n"
@@ -487,12 +523,15 @@ class Handler(BaseHTTPRequestHandler):
                         pass
                 tests = [str(t) for t in ex.get("tests") or []]
                 lang = str(ex.get("language") or "")
-                if not tests or not lang:
-                    # 存量编程题缺测试断言：现场生成并回写缓存
+                regen = bool(body.get("regen"))
+                if regen or not tests or not lang:
+                    # 缺断言或用户要求按自己的代码重生成：现场生成并回写缓存
                     try:
+                        starter = str(ex.get("starter_code") or "")
                         back = _backfill_tests(self.llm, ex or {
                             "question": str(body.get("question") or ""),
-                            "answer": str(body.get("answer") or "")})
+                            "answer": str(body.get("answer") or "")},
+                            starter_code=starter, user_code=code)
                         tests, lang = back["tests"], back["language"]
                         if ex and d and (d / "sections.json").is_file() and tests:
                             secs = json.loads((d / "sections.json").read_text(encoding="utf-8"))
@@ -512,7 +551,19 @@ class Handler(BaseHTTPRequestHandler):
                 if not tests:
                     return self._json({"runnable": False,
                                        "reason": "该题无法自动断言，请交卷后由 AI 评审"})
-                return self._json(run_code_tests(code, tests, lang))
+                result = run_code_tests(code, tests, lang)
+                # 函数名不匹配诊断：测试调用的名字 vs 用户代码定义的名字
+                failed_nameerrors = [r for r in result.get("results", [])
+                                     if "NameError" in (r.get("output") or "")]
+                if failed_nameerrors:
+                    expected = sorted(_test_called_names(tests))
+                    defined = sorted(_code_names(code))
+                    result["mismatch"] = {
+                        "expected": expected, "defined": defined,
+                        "hint": (f"测试断言调用的函数：{', '.join(expected) or '（无）'}；"
+                                 f"你的代码定义的函数：{', '.join(defined) or '（无）'}。"
+                                 "两者不一致——请统一命名，或点击下方按钮按你的代码重新生成测试。")}
+                return self._json(result)
             if u.path == "/api/progress":
                 cid = body.get("course", "")
                 if not cid:
@@ -782,18 +833,23 @@ async function submitQuiz(si,move){
   }
   if(move&&DATA.sections[si+1])renderQuiz(si+1);
 }
-async function runTests(si,i){
+async function runTests(si,i,regen){
   const el=document.getElementById("t"+i);if(!el)return;
   const e=DATA.sections[si].exercises[i];
   const codeEl=document.getElementById("a"+i);
   const code=codeEl?codeEl.value:"";
   el.innerHTML='<span class="dim">⏳ 运行测试中…</span>';
   const d=await api("/api/run_tests",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({code,tests:e.tests,language:e.language||"python"})});
+    body:JSON.stringify({course:COURSE,section:si,idx:i,code,regen:!!regen})});
   if(d.error){el.innerHTML=`<div class="res bad">❌ ${h(d.error)}</div>`;return}
   if(!d.runnable){el.innerHTML=`<div class="res mid">ℹ️ ${h(d.reason)}</div>`;return}
-  el.innerHTML=`<div class="res ${d.passed===d.total?'ok':'bad'}">在线测试：通过 ${d.passed}/${d.total}</div>`+
+  let out=`<div class="res ${d.passed===d.total?'ok':'bad'}">在线测试：通过 ${d.passed}/${d.total}</div>`+
     d.results.map(r=>`<div class="${r.passed?'ok':'bad'}">${r.passed?"✅":"❌"} 断言${r.idx+1}${r.output?` <span class="dim">${h(r.output).slice(0,180)}</span>`:""}</div>`).join("");
+  if(d.mismatch){
+    out+=`<div class="res mid">🔀 ${h(d.mismatch.hint)}</div>`;
+    out+=`<button class="mini" onclick="runTests(${si},${i},true)">🔄 按我的代码重新生成测试</button>`;
+  }
+  el.innerHTML=out;
 }
 
 async function startRun(){

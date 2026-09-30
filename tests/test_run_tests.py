@@ -33,6 +33,22 @@ class TestRunCodeTests(unittest.TestCase):
         self.assertFalse(r["results"][0]["passed"])
         self.assertIn("超时", r["results"][0]["output"])
 
+    def test_nameerror_detected_for_mismatch(self):
+        # 用户定义 f2，测试断言调用 add → NameError，用于函数名不匹配诊断
+        code = "def f2(a, b):\n    return a + b\n"
+        r = run_code_tests(code, ["assert add(1, 2) == 3"], "python")
+        self.assertFalse(r["results"][0]["passed"])
+        self.assertIn("NameError", r["results"][0]["output"])
+
+    def test_code_names_static_analysis(self):
+        from course_agent.webui import _code_names, _test_called_names
+        self.assertEqual(_code_names("def add(a,b):\n    return a+b"), {"add"})
+        self.assertEqual(_code_names("def f():\n    pass"), {"f"})
+        self.assertEqual(_code_names("x = 1"), set())
+        self.assertEqual(_test_called_names(["assert add(1,2)==3",
+                                             "assert foo()"]), {"add", "foo"})
+        self.assertNotIn("len", _test_called_names(["assert len(x)==1"]))
+
     def test_unsupported_language(self):
         r = run_code_tests("<div></div>", [], "other")
         self.assertFalse(r["runnable"])
