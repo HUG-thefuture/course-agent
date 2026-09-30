@@ -117,7 +117,7 @@ def _generate_coding(llm: BaseLLM, course_title: str, section_title: str,
         if last_err:
             prompt += f"\n【修正要求】上一次输出问题：{last_err}，请修正后严格按 JSON 重新输出。"
         try:
-            raw = llm.chat(prompt, "请只输出 JSON。", max_tokens=3072)
+            raw = llm.chat(prompt, "请只输出 JSON。", max_tokens=4096)
             coding, problems = _parse_exercises(extract_json(raw))
             if problems:
                 _log.info("章节「%s」编程题 %d 道未通过校验被丢弃",
@@ -167,7 +167,7 @@ def generate_section(llm: BaseLLM, course_title: str, psec: PlanSection,
             source_text=text, exemplars=exemplars,
         ) + _render_notes_retry(last_err)
         try:
-            raw = llm.chat(prompt, "请只输出 JSON。")
+            raw = llm.chat(prompt, "请只输出 JSON。", max_tokens=3072)
             kps, nodes, expansions = _parse_notes(extract_json(raw))
             break
         except (ValueError, TypeError) as e:
@@ -190,7 +190,7 @@ def generate_section(llm: BaseLLM, course_title: str, psec: PlanSection,
         if last_err:
             prompt += f"\n【修正要求】上一次输出问题：{last_err}，请修正后严格按 JSON 重新输出。"
         try:
-            raw = llm.chat(prompt, "请只输出 JSON。")
+            raw = llm.chat(prompt, "请只输出 JSON。", max_tokens=4096)
             exercises, problems = _parse_exercises(extract_json(raw))
             if problems:
                 _log.info("章节「%s」有 %d 道题未通过校验被丢弃: %s",

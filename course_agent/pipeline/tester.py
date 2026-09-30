@@ -68,6 +68,11 @@ def validate_exercise(d: dict) -> list[str]:
             errs.append(f"language {lang!r} 不合法")
         if isinstance(d.get("tests"), list) and len(d["tests"]) > 8:
             errs.append("测试断言条数过多")
+        q = str(d.get("question") or "")
+        if ("要求" in q or "1." in q) and len(q) >= 40:
+            tail = q.rstrip()[-1]
+            if tail not in "。．.！!？?：:；;）)】]____」\"'、,，0123456789":
+                errs.append("题干疑似截断（要求枚举未完结）")
     diff = d.get("difficulty", "medium")
     if diff not in VALID_DIFFICULTY:
         errs.append(f"难度 {diff!r} 不合法")
