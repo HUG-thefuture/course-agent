@@ -46,6 +46,11 @@ class TestGradeObjective(unittest.TestCase):
 
 class _FakeLLM:
     def chat(self, system, user, **kw):
+        if "教研老师" in system:  # 交卷后的测验解析与强化
+            return json.dumps({"overall": "整体掌握不错，个别概念需巩固",
+                               "items": [{"idx": 0, "analysis": "第1题解析"}],
+                               "weak_points": [{"topic": "事务回滚", "content": "强化讲解"}],
+                               "suggestions": ["复习 rollbackFor"]})
         assert "学生代码" in system or "学生回答" in system
         return json.dumps({"score": 80, "verdict": "部分掌握", "feedback": "还差一个要点"})
 
@@ -122,6 +127,11 @@ class TestServerSmoke(unittest.TestCase):
         self.assertTrue(r["results"][0]["correct"])
         self.assertEqual(r["results"][1]["score"], 80)  # 主观题走 FakeLLM
         self.assertEqual(r["summary"]["correct"], 2)
+        # 交卷后自动生成解析与强化知识
+        self.assertIn("整体", r["review"]["overall"])
+        self.assertTrue(r["review"]["weak_points"])
+        # 并追加保存到课程的 强化复习.md
+        self.assertTrue((Path(self.cfg_out) / cid / "强化复习.md").is_file())
         # 进度已保存
         p = json.loads(urlopen(
             f"http://127.0.0.1:{self.port}/api/progress?course={cid}", timeout=5).read())

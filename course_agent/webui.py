@@ -272,6 +272,76 @@ def _backfill_tests(llm, exercise: dict) -> dict:
             "tests": tests[:4]}
 
 
+def _gen_quiz_review(llm, course_title: str, section_title: str,
+                     items: list[dict], review_note: str) -> dict:
+    """交卷后自动生成：逐题解析 + 薄弱点强化知识 + 复习建议。"""
+    from .utils import extract_json, truncate as _t
+
+    rows = []
+    for it in items:
+        rows.append({
+            "idx": it["idx"], "type": it.get("type", ""),
+            "question": _t(it.get("question", ""), 120),
+            "user_answer": _t(str(it.get("user_answer", "")), 80),
+            "correct": it.get("correct"),
+            "reference": _t(str(it.get("reference", "")), 120),
+        })
+    prompt = (
+        "你是教研老师。学生刚完成一章测验，判分结果已给出。请生成针对性的解析与强化复习内容。\n"
+        "要求：\n"
+        "- items 覆盖每一题：答错的题深度解析（正确答案依据、学生错在哪、正确思路）；答对的题给巩固要点；\n"
+        "- weak_points 只提炼答错题目涉及的知识点（全对则给进阶强化），每条给出强化讲解，150~250 字，"
+        "结合【课程复习笔记】的真实内容，不要编造；\n"
+        "- suggestions 给 2~3 条后续复习建议；\n"
+        "- 只输出 JSON：{\"overall\": \"整体评价60~120字\", "
+        "\"items\": [{\"idx\": 0, \"analysis\": \"该题解析80~200字\"}], "
+        "\"weak_points\": [{\"topic\": \"\", \"content\": \"\"}], "
+        "\"suggestions\": [\"\", \"\"]}\n\n"
+        f"【课程】{course_title} · {section_title}\n"
+        f"【判分结果】\n{json.dumps(rows, ensure_ascii=False)}\n"
+        f"【课程复习笔记】\n{_t(review_note, 2600)}\n"
+    )
+    raw = llm.chat(prompt, "请只输出 JSON。", temperature=0.3, max_tokens=2048)
+    data = extract_json(raw)
+    items_out = []
+    for it in data.get("items") or []:
+        if isinstance(it, dict) and "analysis" in it:
+            items_out.append({"idx": int(it.get("idx", 0)),
+                              "analysis": str(it["analysis"])[:400]})
+    weak = []
+    for w in data.get("weak_points") or []:
+        if isinstance(w, dict) and w.get("topic"):
+            weak.append({"topic": str(w["topic"])[:60],
+                         "content": str(w.get("content", ""))[:400]})
+    sugg = [str(s)[:120] for s in data.get("suggestions") or [] if str(s).strip()][:3]
+    return {"overall": str(data.get("overall", ""))[:300],
+            "items": items_out, "weak_points": weak, "suggestions": sugg}
+
+
+def _append_quiz_report_md(course_dir: Path, section_title: str, review: dict) -> Path:
+    """把本次测验解析与强化知识追加到课程的 强化复习.md。"""
+    md_path = course_dir / "强化复习.md"
+    stamp = time.strftime("%Y-%m-%d %H:%M")
+    lines = [f"\n## {section_title} · 测验解析（{stamp}）", ""]
+    if review.get("overall"):
+        lines += [f"**整体评价**：{review['overall']}", ""]
+    if review.get("items"):
+        lines += ["### 逐题解析", ""]
+        for it in sorted(review["items"], key=lambda x: x["idx"]):
+            lines += [f"- **第 {it['idx'] + 1} 题**：{it['analysis']}", ""]
+    if review.get("weak_points"):
+        lines += ["### 📌 薄弱点强化知识", ""]
+        for w in review["weak_points"]:
+            lines += [f"- **{w['topic']}**：{w['content']}", ""]
+    if review.get("suggestions"):
+        lines += ["### 🧭 复习建议", ""]
+        for s in review["suggestions"]:
+            lines += [f"- {s}", ""]
+    with md_path.open("a", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    return md_path
+
+
 def _course_titles_override(cfg: AgentConfig) -> dict:
     """课程显示名覆盖表（由 tools/rename_courses.py 生成）。"""
     p = Path(cfg.data_dir) / "course_titles.json"
@@ -511,11 +581,45 @@ class Handler(BaseHTTPRequestHandler):
         prog.setdefault("sections", {})[str(si)] = sec_prog
         _save_progress(self.cfg, cid, prog)
         graded = [r for r in results if r["score"] is not None]
+
+        # 交卷后自动生成：逐题解析 + 薄弱点强化知识 + 复习建议（追加到 强化复习.md）
+        review = None
+        try:
+            review_note = ""
+            for name in ("review.md", "notes.md"):
+                f = d / name
+                if f.is_file():
+                    review_note = f.read_text(encoding="utf-8")
+                    break
+            course_title = cid
+            try:
+                course_title = json.loads((d / "session.json").read_text(
+                    encoding="utf-8")).get("title", cid)
+            except (json.JSONDecodeError, OSError):
+                pass
+            items_for_review = []
+            for i, ex in enumerate(exercises):
+                ua = str(answers[i]) if i < len(answers) else ""
+                r = next((r for r in results if r["idx"] == i), None)
+                items_for_review.append({"idx": i, "type": ex.get("type", ""),
+                                         "question": ex.get("question", ""),
+                                         "user_answer": ua,
+                                         "correct": r["correct"] if r else None,
+                                         "reference": ex.get("answer", "")})
+            review = _gen_quiz_review(self.llm, course_title,
+                                      sections[si].get("title", ""),
+                                      items_for_review, review_note)
+            review["saved_to"] = _append_quiz_report_md(
+                d, sections[si].get("title", ""), review).name
+        except (LLMError, ValueError) as e:
+            review = {"error": truncate(str(e), 160)}
+
         return {"results": results,
                 "summary": {"graded": len(graded),
                             "correct": sum(1 for r in graded if r["correct"]),
                             "avg": round(sum(r["score"] for r in graded) / len(graded)) if graded else 0,
-                            "llm_error": llm_err}}
+                            "llm_error": llm_err},
+                "review": review}
 
 
 # ------------------------------------------------------------------ 页面
@@ -594,8 +698,8 @@ async function openCourse(id){
   <div class="card"><h2 style="margin:0 0 6px">${h(s.title)}</h2>
   <span class="${s.passed?'ok':'bad'}">质检${s.passed?'通过':'未过'} ${s.qa_score} 分</span>
   <span class="dim"> · ${s.sections} 章 · ${s.exercises} 题</span></div>
-  <div class="card"><h3>📝 习题练习（逐章作答，交卷自动判分）</h3><div id="quiz"></div>
-  <div id="quiz-nav"></div><div id="quiz-sum" class="dim"></div></div>
+  <div class="card"><h3>📝 习题练习（逐章作答，交卷自动判分+生成解析）</h3><div id="quiz"></div>
+  <div id="quiz-nav"></div><div id="quiz-sum" class="dim"></div><div id="quiz-review"></div></div>
   <div class="card"><h3>🔍 质检报告</h3><pre>${h(DATA.report)}</pre></div>
   <div class="card"><h3>🗒️ 原始笔记（含时间戳回看定位）</h3><pre>${h(DATA.notes)}</pre></div>
   <div class="card"><h3>📖 复习笔记（练习完成后用来巩固：概念+示例+易错点+相关拓展）</h3><pre id="review-pre">${h(DATA.review||"（本课程暂无复习笔记，可用 tools/regen_review.py 生成）")}</pre></div>`;
@@ -662,6 +766,20 @@ async function submitQuiz(si,move){
     el.innerHTML=`<div class="res ${cls}">${r.correct?"✅":"❌"} ${r.score} 分 ${r.verdict||""} ${r.note?("· "+h(r.note)):""}</div>${extra}`;
   });
   $("#quiz-sum").textContent=`本章判分：${d.summary.correct}/${d.summary.graded} 题正确，平均 ${d.summary.avg} 分`+(d.summary.llm_error?`（主观题异常：${d.summary.llm_error}）`:"");
+  const rv=document.getElementById("quiz-review");
+  if(rv){
+    if(d.review&&d.review.overall){
+      let rhtml=`<div class="card" style="margin-top:12px"><h3 style="margin-top:0">📝 本次测验解析与强化知识</h3>
+      <div class="kp"><b>整体评价：</b>${h(d.review.overall)}</div>`;
+      if(d.review.items&&d.review.items.length)rhtml+=`<details open><summary>逐题解析</summary>`+d.review.items.map(it=>`<div class="kp"><b>第 ${it.idx+1} 题</b>：${h(it.analysis)}</div>`).join("")+`</details>`;
+      if(d.review.weak_points&&d.review.weak_points.length)rhtml+=`<details open><summary>📌 薄弱点强化知识</summary>`+d.review.weak_points.map(w=>`<div class="kp"><b>${h(w.topic)}</b>：${h(w.content)}</div>`).join("")+`</details>`;
+      if(d.review.suggestions&&d.review.suggestions.length)rhtml+=`<details><summary>🧭 复习建议</summary>`+d.review.suggestions.map(s=>`<div class="kp">· ${h(s)}</div>`).join("")+`</details>`;
+      if(d.review.saved_to)rhtml+=`<div class="dim" style="margin-top:8px">已追加保存到课程目录：${h(d.review.saved_to)}</div>`;
+      rv.innerHTML=rhtml+`</div>`;
+    } else if(d.review&&d.review.error){
+      rv.innerHTML=`<div class="res mid">解析生成失败：${h(d.review.error)}（判分结果不受影响）</div>`;
+    } else { rv.innerHTML=""; }
+  }
   if(move&&DATA.sections[si+1])renderQuiz(si+1);
 }
 async function runTests(si,i){
