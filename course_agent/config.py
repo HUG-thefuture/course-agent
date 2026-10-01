@@ -68,11 +68,26 @@ class PipelineConfig:
 
 
 @dataclass
+class ProviderConfig:
+    """额外云端服务商：models 按序自动故障转移。"""
+
+    name: str = ""
+    enabled: bool = False
+    base_url: str = ""
+    models: list = field(default_factory=list)
+    api_key: str = ""
+    timeout: int = 120
+    max_retries: int = 2
+    extra_body: dict = field(default_factory=dict)
+
+
+@dataclass
 class AgentConfig:
     local: LocalConfig = field(default_factory=LocalConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
+    providers: list = field(default_factory=list)  # 多服务商（ProviderConfig）
     prefer: str = "local"          # local / api / auto(local 优先，失败回落 api)
     review_source: str = "same"    # same / api（用外部模型独立审查，更客观）
     data_dir: str = "data"
@@ -114,6 +129,11 @@ def load_config(path: str | Path | None = None) -> AgentConfig:
             _merge(cfg.api, data.get("api", {}))
             _merge(cfg.vision, data.get("vision", {}))
             _merge(cfg.pipeline, data.get("pipeline", {}))
+            if isinstance(data.get("providers"), list):
+                cfg.providers = [
+                    ProviderConfig(**{k: v for k, v in row.items()
+                                      if k in ProviderConfig.__dataclass_fields__})
+                    for row in data["providers"] if isinstance(row, dict)]
             for k in ("prefer", "review_source", "data_dir", "output_dir"):
                 if k in data:
                     setattr(cfg, k, data[k])
