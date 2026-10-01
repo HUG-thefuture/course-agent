@@ -15,9 +15,16 @@ ROOT = Path(__file__).resolve().parent.parent
 DESKTOP = Path.home() / "Desktop"
 
 START_BAT = r"""@echo off
+rem 已有实例在运行(端口通)则只打开浏览器, 不再启动第二个服务
+powershell -NoProfile -Command "try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', 8686); $c.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
+if not errorlevel 1 (
+    start "" http://127.0.0.1:8686
+    exit /b 0
+)
 cd /d "{root}"
-start "CourseAgent" /min "{pythonw}" -m course_agent.web --port 8686
-timeout /t 2 /nobreak >nul
+rem --no-browser: 浏览器统一由本脚本打开(仅一次), 避免服务自己再开一个
+start "CourseAgent" /min "{pythonw}" -m course_agent.web --port 8686 --no-browser
+timeout /t 3 /nobreak >nul
 start "" http://127.0.0.1:8686
 """
 
@@ -46,8 +53,9 @@ def main() -> int:
                 break
         else:
             pythonw = Path("pythonw.exe")
-    ctx = {"root": str(ROOT), "pythonw": str(pythonw)}
-    write_bat(DESKTOP / "CourseAgent图形版.bat", START_BAT.format(**ctx))
+    # 不用 .format()——bat 里的 PowerShell 代码含 { } 会被误当占位符
+    text = START_BAT.replace("{root}", str(ROOT)).replace("{pythonw}", str(pythonw))
+    write_bat(DESKTOP / "CourseAgent图形版.bat", text)
     write_bat(DESKTOP / "CourseAgent停止.bat", STOP_BAT)
     return 0
 
