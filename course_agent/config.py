@@ -34,6 +34,7 @@ class ApiConfig:
     timeout: int = 120
     max_retries: int = 2
     extra_body: dict = field(default_factory=dict)  # 透传给请求体（如关闭思考模式）
+    models: list = field(default_factory=list)      # 云端模型切换链（按序自动故障转移）
 
 
 @dataclass

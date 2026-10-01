@@ -114,6 +114,10 @@ class OpenAICompatClient(BaseLLM):
                 content = data["choices"][0]["message"]["content"]
                 if not isinstance(content, str):
                     raise LLMError(f"{self.name} 返回的 content 类型异常: {type(content)}")
+                if not content.strip():
+                    # 空内容（思考型模型推理耗尽预算/被限流）视同失败，
+                    # 让 Router 得以自动切换到下一个模型
+                    raise LLMError(f"{self.name} 返回空内容")
                 return content
             except urllib.error.HTTPError as e:
                 last_err = e

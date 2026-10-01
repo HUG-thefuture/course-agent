@@ -30,6 +30,7 @@ from .ingest.loader import (AUDIO_EXTS, IngestError, VIDEO_EXTS,
                             classify_url, load_source, resolve_media_url)
 from .ingest.transcriber import TranscribeError, segments_to_srt, transcribe_media
 from .llm import LLMError, MockLLM, OpenAICompatClient, Router
+from .llm.factory import build_client_chains
 from .memory import Memory
 from .outputs import write_all
 from .pipeline.executor import ExecuteError

@@ -121,6 +121,21 @@ class TestRouter(unittest.TestCase):
             r.chat("s", "u")
         self.assertIn("均调用失败", str(ctx.exception))
 
+    def test_empty_content_triggers_failover(self):
+        # 空输出（思考型模型推理耗尽预算）视同失败 → Router 自动切下一模型
+        def empty_then_ok(req, timeout):
+            if not hasattr(empty_then_ok, "n"):
+                empty_then_ok.n = 0
+            empty_then_ok.n += 1
+            if empty_then_ok.n == 1:
+                return 200, json.dumps({"choices": [{"message": {"content": ""}}]}).encode()
+            return 200, json.dumps({"choices": [{"message": {"content": "备用模型答复"}}]}).encode()
+
+        c1 = OpenAICompatClient("http://x1/v1", "m1", transport=empty_then_ok)
+        c2 = OpenAICompatClient("http://x2/v1", "m2", transport=_ok_transport("兜底"))
+        r = Router([c1, c2])
+        self.assertEqual(r.chat("s", "u"), "兜底")  # c1 空输出被拒 → c2 顶上
+
     def test_prefer_api(self):
         local = OpenAICompatClient("http://localhost:9/v1", "local-m",
                                    transport=_ok_transport("local"))

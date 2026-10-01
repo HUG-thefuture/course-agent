@@ -194,18 +194,10 @@ def _run_pipeline_async(input_src: str, password: str, title: str, cfg: AgentCon
 
 
 def _build_llm(cfg: AgentConfig):
-    from .llm import MockLLM, OpenAICompatClient, Router
-    local = OpenAICompatClient(
-        base_url=cfg.local.base_url, model=cfg.local.model,
-        api_key=cfg.local.api_key, timeout=cfg.local.timeout,
-        max_retries=cfg.local.max_retries)
-    clients = [local]
-    if cfg.api.enabled and cfg.api_key_effective:
-        clients.append(OpenAICompatClient(
-            base_url=cfg.api.base_url, model=cfg.api.model,
-            api_key=cfg.api_key_effective, timeout=cfg.api.timeout,
-            max_retries=cfg.api.max_retries, extra_body=cfg.api.extra_body))
-    return Router(clients)
+    from .llm import MockLLM, Router
+    from .llm.factory import build_client_chains
+    local_chain, cloud_chain = build_client_chains(cfg)
+    return Router(local_chain + cloud_chain)
 
 
 # ------------------------------------------------------------------ 在线测试
