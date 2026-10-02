@@ -37,7 +37,7 @@ from .pipeline.executor import ExecuteError
 from .pipeline.planner import PlanError
 from .pipeline.orchestrator import Orchestrator
 from .prompts import PromptError
-from .utils import safe_read_text, setup_logging
+from .utils import safe_read_text, setup_logging, truncate
 
 _log = logging.getLogger("course_agent")
 
@@ -253,6 +253,66 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_kb_build(args: argparse.Namespace) -> int:
+    from .kb import build_kb
+    setup_logging(args.verbose)
+    kb = build_kb(args.course_root, args.out)
+    print(f"知识库索引已构建：{len(kb.chunks)} 个知识块 -> {args.out}")
+    return 0
+
+
+def cmd_kb_search(args: argparse.Namespace) -> int:
+    from .kb import KnowledgeBase
+    kb = KnowledgeBase(args.out)
+    if not kb.load():
+        print("索引不存在，先执行: python main.py kb-build")
+        return 1
+    rows = kb.search(args.query, top_k=args.top_k, type_=args.type)
+    if not rows:
+        print("无匹配结果")
+        return 0
+    for r in rows:
+        head = f"[{r['type']}] {r['course']} · {r['section']} · {r.get('title', '')}"
+        if r.get("time"):
+            head += f" (课程 {r['time']})"
+        print(f"{head}  (相关度 {r['score']})")
+        body = r.get("concept") or r.get("question") or r.get("text", "")
+        print(f"  {truncate(body, 200)}")
+    return 0
+
+
+def cmd_kb_ask(args: argparse.Namespace) -> int:
+    from .kb import KnowledgeBase
+    from .llm import LLMError
+    kb = KnowledgeBase(args.out)
+    if not kb.load():
+        print("索引不存在，先执行: python main.py kb-build")
+        return 1
+    rows = kb.search(args.question, top_k=args.top_k)
+    context = "\n\n".join(
+        f"【{r['course']} · {r['section']}】{r.get('title', '')}\n"
+        f"{truncate(r.get('concept') or r.get('question') or r.get('text', ''), 500)}"
+        for r in rows)
+    cfg = load_config(args.config)
+    llm = build_llm(cfg, mock=args.mock)
+    try:
+        answer = llm.chat(
+            "你是课程助教。仅依据【知识库片段】回答问题；片段不足以回答时明确说明。"
+            "回答末尾标注引用来源（课程·章节）。\n"
+            f"【问题】{args.question}\n【知识库片段】\n{truncate(context, 5000)}",
+            "请作答。", max_tokens=2048)
+    except LLMError as e:
+        print(f"大模型不可用，附检索结果：{e}")
+        for r in rows:
+            print(f"[{r['course']} · {r['section']}] {r.get('title', '')}")
+        return 1
+    print(answer)
+    print("\n引用来源：")
+    for r in rows:
+        print(f"  - {r['course']} · {r['section']} · {r.get('title', '')}")
+    return 0
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     setup_logging(args.verbose)
     cfg = load_config(args.config)
@@ -329,6 +389,25 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--outdir", default="", help="输出目录（默认 data/transcripts）")
     common(fetch)
 
+    kb = sub.add_parser("kb-build", help="构建课程知识库检索索引(RAG)")
+    kb.add_argument("--course-root", default="output/特训营全部课程")
+    kb.add_argument("--out", default="data/kb_index.json")
+    common(kb)
+
+    kbs = sub.add_parser("kb-search", help="知识库关键词检索")
+    kbs.add_argument("query")
+    kbs.add_argument("--top-k", type=int, default=5)
+    kbs.add_argument("--type", choices=["knowledge", "expansion", "exercise"], default=None)
+    kbs.add_argument("--out", default="data/kb_index.json")
+    common(kbs)
+
+    kba = sub.add_parser("kb-ask", help="知识库问答(检索+大模型生成带引用回答)")
+    kba.add_argument("question")
+    kba.add_argument("--top-k", type=int, default=5)
+    kba.add_argument("--out", default="data/kb_index.json")
+    kba.add_argument("--mock", action="store_true")
+    common(kba)
+
     conf = sub.add_parser("config", help="查看配置与连通性")
     common(conf)
     return p
@@ -341,7 +420,8 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {"run": cmd_run, "batch": cmd_batch, "demo": cmd_demo,
                 "improve": cmd_improve, "rate": cmd_rate,
                 "export-sft": cmd_export_sft, "fetch": cmd_fetch,
-                "config": cmd_config}
+                "kb-build": cmd_kb_build, "kb-search": cmd_kb_search,
+                "kb-ask": cmd_kb_ask, "config": cmd_config}
     try:
         return handlers[args.command](args)
     except (LLMError, ValueError, FileNotFoundError, IngestError,
