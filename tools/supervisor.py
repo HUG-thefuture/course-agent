@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 _POLL = 120
-_MAX_STALL = 5
+_STALL_MINUTES = 40  # 距上次进展超过该分钟数才放弃（大课一门可达 20 分钟）
 
 
 def _ps(command: str, timeout: int = 60) -> str:
@@ -96,7 +96,7 @@ def main() -> int:
         all_settled = True
         progress_any = False
         for k, w in work_files.items():
-            st = state.setdefault(k, {"restarts": 0, "progress": 0,
+            st = state.setdefault(k, {"progress": 0, "last_progress_ts": 0,
                                       "gave_up": False})
             if st.get("gave_up"):
                 continue
@@ -107,22 +107,27 @@ def main() -> int:
             all_settled = False
             pids = batch_pids(f"work_{k}.list")
             if pids:
+                if done > st.get("progress", 0):  # 有进展即刷新时间戳
+                    st["progress"] = done
+                    st["last_progress_ts"] = time.time()
                 continue
-            # 进程不在：判断是否有进展决定重启或放弃
-            if st.get("progress", 0) >= done:
-                st["restarts"] = st.get("restarts", 0) + 1
-            else:
-                st["restarts"] = 0
-                st["progress"] = done
-                progress_any = True
-            if st["restarts"] >= _MAX_STALL:
+            # 进程不在：有进展 → 立即重启；无进展且超时窗已过 → 放弃
+            now = time.time()
+            stalled = (done <= st.get("progress", 0)
+                       and st.get("last_progress_ts", 0) > 0
+                       and now - st["last_progress_ts"] > _STALL_MINUTES * 60)
+            if stalled:
                 (data_dir / f"work_{k}.skipped").write_text(
                     time.strftime("%Y-%m-%d %H:%M:%S"), encoding="utf-8")
                 st["gave_up"] = True
-                print(f"[{k}] 连续 {_MAX_STALL} 次重启无进展，放弃该分区", flush=True)
+                print(f"[{k}] {int((now - st['last_progress_ts'])/60)} 分钟无进展，放弃该分区",
+                      flush=True)
                 continue
-            print(f"[{k}] 重启分区（已完成 {done}/{total}，"
-                  f"第 {st['restarts'] + 1} 次重启）", flush=True)
+            st["progress"] = max(st.get("progress", 0), done)
+            if done > st.get("progress", 0):
+                st["last_progress_ts"] = now
+            st.setdefault("last_progress_ts", now)
+            print(f"[{k}] 重启分区（已完成 {done}/{total}）", flush=True)
             spawn(w, data_dir, cfg)
             time.sleep(5)
         # 持久化状态
