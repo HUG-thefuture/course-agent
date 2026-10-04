@@ -318,6 +318,11 @@ def cmd_kb_ask(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tutor(args: argparse.Namespace) -> int:
+    from .tutor import main as tutor_main
+    return tutor_main(["--course-root", args.course_root])
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     setup_logging(args.verbose)
     cfg = load_config(args.config)
@@ -414,6 +419,10 @@ def build_parser() -> argparse.ArgumentParser:
     kba.add_argument("--mock", action="store_true")
     common(kba)
 
+    tutor = sub.add_parser("tutor", help="双擎学习助手（交互式刷题/讲解/诊断）")
+    tutor.add_argument("--course-root", default="output/特训营全部课程")
+    common(tutor)
+
     conf = sub.add_parser("config", help="查看配置与连通性")
     common(conf)
     return p
@@ -427,7 +436,8 @@ def main(argv: list[str] | None = None) -> int:
                 "improve": cmd_improve, "rate": cmd_rate,
                 "export-sft": cmd_export_sft, "fetch": cmd_fetch,
                 "kb-build": cmd_kb_build, "kb-search": cmd_kb_search,
-                "kb-ask": cmd_kb_ask, "config": cmd_config}
+                "kb-ask": cmd_kb_ask, "tutor": cmd_tutor,
+                "config": cmd_config}
     try:
         return handlers[args.command](args)
     except (LLMError, ValueError, FileNotFoundError, IngestError,
