@@ -26,8 +26,12 @@ INDEX_NAME = "kb_index.json"
 
 class KBRuntime:
     def __init__(self, course_root: Path, data_dir: Path):
+        from .kb_vector import OllamaEmbedder
         self.course_root = course_root
+        self.data_dir = data_dir
         self.index_path = data_dir / INDEX_NAME
+        self.chroma_dir = data_dir / "chromadb"
+        self.embedder = OllamaEmbedder()
         self.kb = KnowledgeBase(self.index_path)
         if not self.kb.load():
             self.rebuild({})
@@ -39,11 +43,13 @@ class KBRuntime:
                           ensure_ascii=False)
 
     def search(self, args: dict) -> str:
+        from .kb_vector import hybrid_search
         if not self.kb.chunks and not self.kb.load():
             self.rebuild({})
-        rows = self.kb.search(str(args.get("query", "")),
-                              top_k=int(args.get("top_k", 5)),
-                              type_=args.get("type") or None)
+        rows = hybrid_search(self.kb, self.chroma_dir, self.embedder,
+                             str(args.get("query", "")),
+                             top_k=int(args.get("top_k", 5)),
+                             type_=args.get("type") or None)
         return json.dumps({"count": len(rows), "results": rows},
                           ensure_ascii=False, indent=1)
 
@@ -55,9 +61,11 @@ class KBRuntime:
         question = str(args.get("question", "")).strip()
         if not question:
             return json.dumps({"error": "question 必填"}, ensure_ascii=False)
+        from .kb_vector import hybrid_search
         if not self.kb.chunks and not self.kb.load():
             self.rebuild({})
-        rows = self.kb.search(question, top_k=int(args.get("top_k", 5)))
+        rows = hybrid_search(self.kb, self.chroma_dir, self.embedder,
+                             question, top_k=int(args.get("top_k", 5)))
         context = "\n\n".join(
             f"【{r['course']} · {r['section']}】{r.get('title', '')}\n{truncate(r.get('concept') or r.get('text', ''), 500)}"
             for r in rows)

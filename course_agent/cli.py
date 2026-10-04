@@ -263,11 +263,16 @@ def cmd_kb_build(args: argparse.Namespace) -> int:
 
 def cmd_kb_search(args: argparse.Namespace) -> int:
     from .kb import KnowledgeBase
+    from .kb_vector import OllamaEmbedder, hybrid_search
     kb = KnowledgeBase(args.out)
     if not kb.load():
         print("索引不存在，先执行: python main.py kb-build")
         return 1
-    rows = kb.search(args.query, top_k=args.top_k, type_=args.type)
+    if args.bm25_only:
+        rows = kb.search(args.query, top_k=args.top_k, type_=args.type)
+    else:
+        rows = hybrid_search(kb, "data/chromadb", OllamaEmbedder(),
+                             args.query, top_k=args.top_k, type_=args.type)
     if not rows:
         print("无匹配结果")
         return 0
@@ -399,6 +404,7 @@ def build_parser() -> argparse.ArgumentParser:
     kbs.add_argument("--top-k", type=int, default=5)
     kbs.add_argument("--type", choices=["knowledge", "expansion", "exercise"], default=None)
     kbs.add_argument("--out", default="data/kb_index.json")
+    kbs.add_argument("--bm25-only", action="store_true", help="只用关键词检索")
     common(kbs)
 
     kba = sub.add_parser("kb-ask", help="知识库问答(检索+大模型生成带引用回答)")

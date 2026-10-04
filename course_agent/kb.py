@@ -27,6 +27,7 @@ def iter_course_chunks(course_root: str | Path) -> list[dict]:
     chunks: list[dict] = []
     if not root.is_dir():
         return chunks
+    from .kb_vector import chunk_id
     for d in sorted(p for p in root.iterdir() if (p / "sections.json").is_file()):
         try:
             secs = json.loads((d / "sections.json").read_text(encoding="utf-8"))
@@ -44,6 +45,7 @@ def iter_course_chunks(course_root: str | Path) -> list[dict]:
                 if not text.strip():
                     continue
                 chunks.append({
+                    "id": chunk_id(cid, stitle, "knowledge", kp.get("title", "")),
                     "type": "knowledge", "course": course, "course_id": cid,
                     "section": stitle, "title": kp.get("title", ""),
                     "text": text, "time": kp.get("time", ""),
@@ -54,6 +56,7 @@ def iter_course_chunks(course_root: str | Path) -> list[dict]:
                 if not text.strip():
                     continue
                 chunks.append({
+                    "id": chunk_id(cid, stitle, "expansion", ex.get("topic", "")),
                     "type": "expansion", "course": course, "course_id": cid,
                     "section": stitle, "title": ex.get("topic", ""),
                     "text": text, "time": "",
@@ -65,6 +68,7 @@ def iter_course_chunks(course_root: str | Path) -> list[dict]:
                 if not text.strip():
                     continue
                 chunks.append({
+                    "id": chunk_id(cid, stitle, "exercise", e.get("question", "")[:60]),
                     "type": "exercise", "course": course, "course_id": cid,
                     "section": stitle, "title": e.get("question", "")[:60],
                     "text": text, "time": "",
