@@ -120,7 +120,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--transcripts", default="data/harvest_transcripts")
     ap.add_argument("--force", action="store_true", help="已有 review.md 也重生成")
     ap.add_argument("--limit", type=int, default=0)
-    args = ap.parse_args(argv[1:])
+    args = ap.parse_args(argv)
 
     cfg = load_config()
     from course_agent.llm import MockLLM  # noqa: F401

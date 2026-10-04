@@ -124,7 +124,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--transcripts", default="data/harvest_transcripts")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--force", action="store_true", help="已有合格编程题也重出")
-    args = ap.parse_args(argv[1:])
+    args = ap.parse_args(argv)
 
     cfg = load_config()
     pcfg = cfg.pipeline

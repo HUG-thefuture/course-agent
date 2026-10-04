@@ -53,7 +53,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--expect", type=int, default=34)
     ap.add_argument("--max-hours", type=float, default=6.0)
     ap.add_argument("--poll", type=int, default=60, help="轮询间隔秒数")
-    args = ap.parse_args(argv[1:])
+    args = ap.parse_args(argv)
 
     courses = json.loads(Path(args.courses).read_text(encoding="utf-8"))
     url_dir, vid_dir = Path(args.urls), Path(args.videos)

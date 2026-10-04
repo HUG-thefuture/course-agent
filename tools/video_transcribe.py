@@ -73,7 +73,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--wait-all", action="store_true", help="等待全部直链文件就绪")
     ap.add_argument("--expect", type=int, default=0, help="期望的直链文件总数")
     ap.add_argument("--max-wait-hours", type=float, default=12.0)
-    args = ap.parse_args(argv[1:])
+    args = ap.parse_args(argv)
 
     courses = json.loads(Path(args.courses).read_text(encoding="utf-8"))
     url_dir = Path(args.urls)
