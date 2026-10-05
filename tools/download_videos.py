@@ -62,6 +62,7 @@ def main(argv: list[str]) -> int:
 
     stats = {"ok": 0, "fail": 0}
     fails: dict[int, int] = {}  # 连续失败次数，达到上限才放弃
+    gave_up: set[int] = set()
     while time.time() < deadline:
         pending = []
         for c in courses:
@@ -77,7 +78,12 @@ def main(argv: list[str]) -> int:
                 pending.append(c)
                 continue
             if fails.get(c["seq"], 0) >= 60:
-                continue  # 多次失败（多半 token 已过期等待重采），本轮放弃
+                if c["seq"] not in gave_up:  # 计一次失败，不随轮询膨胀
+                    gave_up.add(c["seq"])
+                    stats["fail"] += 1
+                    print(f"[{c['seq']:03d}] 连续失败 60 次，放弃（多半 token 已过期等待重采）",
+                          flush=True)
+                continue
             try:
                 download(pick(urls), mp4)
                 stats["ok"] += 1
@@ -91,7 +97,7 @@ def main(argv: list[str]) -> int:
                     pending.append(c)  # 留在待办里，等重采后重试
         if not pending:
             print(f"\n全部就绪：成功 {stats['ok']}，失败 {stats['fail']}")
-            return 0
+            return 1 if gave_up else 0
         print(f"等待：还差 {len(pending)} 门，{args.poll} 秒后重试", flush=True)
         time.sleep(args.poll)
     print("超时退出")
@@ -100,4 +106,4 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     import sys
-    raise SystemExit(main(sys.argv))
+    raise SystemExit(main(sys.argv[1:]))

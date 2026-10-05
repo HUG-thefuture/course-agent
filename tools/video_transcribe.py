@@ -48,9 +48,10 @@ def _download(url: str, dest: Path) -> None:
             if not chunk:
                 break
             f.write(chunk)
-    if part.stat().st_size < 1_000_000:
+    size = part.stat().st_size
+    if size < 1_000_000:
         part.unlink(missing_ok=True)
-        raise RuntimeError(f"下载内容过小({part.stat().st_size}B)，token 可能已过期")
+        raise RuntimeError(f"下载内容过小({size}B)，token 可能已过期")
     part.rename(dest)
 
 
@@ -144,4 +145,4 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     import sys
-    raise SystemExit(main(sys.argv))
+    raise SystemExit(main(sys.argv[1:]))

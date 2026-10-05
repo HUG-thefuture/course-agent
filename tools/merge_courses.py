@@ -48,10 +48,26 @@ KEYWORDS = [
 ]
 
 
-def group_of(title: str) -> str:
-    m = re.match(r"^(\d{1,3})[、.．-]", title.strip())
+def course_number(title: str) -> int | None:
+    """从标题提取课程编号（对应 SERIES 编号空间，非录制目录序号）。
+
+    - "072-35-新闻APP…"：首段是录制序号，第二段才是课号 → 35；
+    - "45、request…"：首段即课号 → 45；
+    - "001-人工智能产训特训-…"：无第二编号段 → None（走关键词归类）。
+    """
+    s = title.strip()
+    m = re.match(r"^\d{1,3}[-–](\d{1,3})(?:[、.．-]|$)", s)
     if m:
-        num = int(m.group(1))
+        return int(m.group(1))
+    m = re.match(r"^(\d{1,3})[、.．]", s)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def group_of(title: str) -> str:
+    num = course_number(title)
+    if num is not None:
         for lo, hi, name in SERIES:
             if lo <= num <= hi:
                 return name
@@ -77,10 +93,14 @@ def _course_text(d: Path) -> str:
 
 def content_clusters(courses: list[Path], embedder, threshold: float = 0.55
                      ) -> list[list[Path]]:
-    """按课程内容向量贪心聚类（余弦相似度 >= threshold 并组）。"""
+    """按课程内容向量贪心聚类（余弦相似度 >= threshold 并组）。
+
+    无文本内容的课程不参与聚类（嵌入字面量会彼此高度相似而错误抱团），单独成组。
+    """
     import math
     texts = {d: _course_text(d) for d in courses}
-    embd = {d: embedder.embed([t or "空"])[0] for d, t in texts.items()}
+    embd = {d: (embedder.embed([t])[0] if t.strip() else None)
+            for d, t in texts.items()}
 
     def cos(a, b):
         dot = sum(x * y for x, y in zip(a, b))
@@ -90,9 +110,15 @@ def content_clusters(courses: list[Path], embedder, threshold: float = 0.55
 
     clusters: list[list[Path]] = []
     for d in courses:
+        if embd[d] is None:
+            clusters.append([d])
+            continue
         best, best_s = None, threshold
         for cl in clusters:
-            s = sum(cos(embd[d], embd[m]) for m in cl) / len(cl)
+            members = [m for m in cl if embd[m] is not None]
+            if not members:
+                continue
+            s = sum(cos(embd[d], embd[m]) for m in members) / len(members)
             if s > best_s:
                 best, best_s = cl, s
         if best is not None:
@@ -131,9 +157,11 @@ def collect_groups(output_root: Path) -> dict[str, list[Path]]:
         except (json.JSONDecodeError, OSError):
             pass
         name = group_of(title or d.name)
-        # 排序键：标题里的编号（无编号排最后按日期）
-        m = re.search(r"(\d{1,3})[、.．-]", title)
-        order = int(m.group(1)) if m else 9999
+        # 排序键：课程编号（优先第二编号段），无编号排最后按日期
+        order = course_number(title or "")
+        if order is None:
+            m = re.search(r"(\d{1,3})", title or d.name)
+            order = int(m.group(1)) if m else 9999
         groups.setdefault(name, []).append((d, order))
     for name in groups:
         groups[name].sort(key=lambda x: x[1])

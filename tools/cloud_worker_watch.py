@@ -54,13 +54,13 @@ def truncate_text(s: str, n: int) -> str:
 
 def remaining_courses(cfg) -> list[Path]:
     """无 session.json 产物的转写稿（本地链路尚未完成的部分）。"""
-    out = Path(cfg.output_dir)
+    out = ROOT / cfg.output_dir  # 锚定项目根，不随 CWD 漂移
     done_stems: set[str] = set()
     if out.is_dir():
         for d in out.rglob("session.json"):
             stem = d.parent.name.split("-", 1)[-1]  # 去掉批量序号前缀
             done_stems.add(stem)
-    tdir = Path(cfg.data_dir) / "harvest_transcripts"
+    tdir = ROOT / cfg.data_dir / "harvest_transcripts"
     remaining = []
     for f in sorted(tdir.glob("*.json")):
         if f.stem == "harvest_report":

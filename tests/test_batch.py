@@ -152,6 +152,20 @@ class TestRunBatch(unittest.TestCase):
                             .read_text(encoding="utf-8"))
         self.assertEqual(report["retry_rounds"], 1)  # 轮数用尽后停止
 
+    def test_retry_covers_untitled_items(self):
+        # 无标题条目（如裸 URL）也必须进重试：旧实现按 (source, title="") 查
+        # outcome_map，而失败条目的标题是解析出来的 slug，永远查不到、一次不重试
+        from course_agent.llm import MockLLM
+        self.cfg.pipeline.retry_until_pass = 1
+        out = run_batch(MockLLM(fail_plan=999), self.cfg,
+                        [BatchItem("不存在_9x.mp4")],  # 注意：无标题
+                        out_root=self.td / "out5c")
+        self.assertEqual(out[0].status, "failed")
+        report = json.loads((self.td / "out5c" / "batch_report.json")
+                            .read_text(encoding="utf-8"))
+        self.assertEqual(report["retry_rounds"], 1)
+        self.assertEqual(len(report["outcomes"]), 1)  # 不残留重复条目
+
     def test_transcribe_cache(self):
         import course_agent.batch as batch_mod
         calls = {"n": 0}

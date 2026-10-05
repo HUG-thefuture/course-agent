@@ -114,6 +114,8 @@ def vector_search(chroma_dir: str | Path, embedder: OllamaEmbedder,
     except Exception:
         return []
     qemb = embedder.embed([query])[0]
+    if col.count() == 0:
+        return []  # 空库：ChromaDB 不接受 n_results=0
     res = col.query(query_embeddings=[qemb], n_results=min(top_k, col.count()),
                     where={"type": type_} if type_ else None)
     out = []
@@ -158,8 +160,12 @@ def hybrid_search(bm25_kb: KnowledgeBase, chroma_dir: str | Path,
     """
     core = extract_keywords(query)
     bm = bm25_kb.search(query, top_k=top_k * 2, type_=type_)
-    bm += [c for c in bm25_kb.search(core, top_k=top_k, type_=type_)
-           if c not in bm]
+    # 二次检索按块 id 去重（dict 全字段相等会因 score 不同而失效，导致 RRF 双计）
+    seen_ids = {c.get("id") for c in bm}
+    for c in bm25_kb.search(core, top_k=top_k, type_=type_):
+        if c.get("id") not in seen_ids:
+            bm.append(c)
+            seen_ids.add(c.get("id"))
     vec = vector_search(chroma_dir, embedder, core or query,
                         top_k=top_k * 2, type_=type_)
     fused = rrf_fuse([bm, vec], top_k=top_k)

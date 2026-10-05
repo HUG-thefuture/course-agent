@@ -118,11 +118,72 @@ def handle_tool(rt: KBRuntime, name: str, args: dict) -> dict:
     return {"content": [{"type": "text", "text": f"未知工具: {name}"}], "isError": True}
 
 
+def _handle_request(rt: KBRuntime, req, out) -> None:
+    """处理单个 JSON-RPC 请求并写出响应；通知不回复，异常回 -32603。"""
+    if not isinstance(req, dict):
+        # batch 数组等非对象请求：逐个元素再处理
+        if isinstance(req, list):
+            for item in req:
+                _handle_request(rt, item, out)
+        return
+    rid = req.get("id")
+    method = req.get("method", "")
+    params = req.get("params")
+    if not isinstance(params, dict):
+        params = {}
+    try:
+        if method == "initialize":
+            result = {"protocolVersion": params.get("protocolVersion", "2024-11-05"),
+                      "capabilities": {"tools": {}},
+                      "serverInfo": {"name": "course-agent-kb", "version": "1.0.0"}}
+        elif method.startswith("notifications/"):
+            return  # 通知无 id 不回复
+        elif method == "ping":
+            result = {}
+        elif method == "tools/list":
+            result = {"tools": TOOLS}
+        elif method == "tools/call":
+            try:
+                result = handle_tool(rt, params.get("name", ""),
+                                     params.get("arguments") or {})
+            except Exception as e:  # 工具故障以 isError 返回，不杀服务器
+                result = {"content": [{"type": "text",
+                                       "text": f"工具执行失败: {e}"}],
+                          "isError": True}
+        elif method == "resources/list":
+            result = {"resources": []}
+        elif method == "prompts/list":
+            result = {"prompts": []}
+        else:
+            if rid is not None:
+                out.write(json.dumps({"jsonrpc": "2.0", "id": rid, "error": {
+                    "code": -32601, "message": f"method not found: {method}"}},
+                    ensure_ascii=False) + "\n")
+            return
+    except Exception as e:  # 分发层兜底
+        if rid is None:
+            return
+        out.write(json.dumps({"jsonrpc": "2.0", "id": rid, "error": {
+            "code": -32603, "message": f"internal error: {e}"}},
+            ensure_ascii=False) + "\n")
+        return
+    if rid is not None:
+        out.write(json.dumps({"jsonrpc": "2.0", "id": rid, "result": result},
+                             ensure_ascii=False) + "\n")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="CourseAgent 知识库 MCP 服务器 (stdio)")
     ap.add_argument("--course-root", default="output/特训营全部课程")
     ap.add_argument("--data-dir", default="data")
     args = ap.parse_args(argv)
+
+    # stdio 强制 UTF-8：Windows 默认管道编码是 GBK，中文 JSON-RPC 会乱码/崩溃
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
     rt = KBRuntime(Path(args.course_root), Path(args.data_dir))
     out = sys.stdout
@@ -134,37 +195,7 @@ def main(argv: list[str] | None = None) -> int:
             req = json.loads(line)
         except json.JSONDecodeError:
             continue
-        rid = req.get("id")
-        method = req.get("method", "")
-        if method == "initialize":
-            result = {"protocolVersion": req.get("params", {}).get(
-                "protocolVersion", "2024-11-05"),
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "course-agent-kb", "version": "1.0.0"}}
-        elif method == "notifications/initialized" or method.startswith("notifications/"):
-            continue
-        elif method == "ping":
-            result = {}
-        elif method == "tools/list":
-            result = {"tools": TOOLS}
-        elif method == "tools/call":
-            params = req.get("params") or {}
-            result = handle_tool(rt, params.get("name", ""),
-                                 params.get("arguments") or {})
-        elif method == "resources/list":
-            result = {"resources": []}
-        elif method == "prompts/list":
-            result = {"prompts": []}
-        else:
-            if rid is not None:
-                out.write(json.dumps({"jsonrpc": "2.0", "id": rid, "error": {
-                    "code": -32601, "message": f"method not found: {method}"}},
-                    ensure_ascii=False) + "\n")
-            out.flush()
-            continue
-        if rid is not None:
-            out.write(json.dumps({"jsonrpc": "2.0", "id": rid, "result": result},
-                                 ensure_ascii=False) + "\n")
+        _handle_request(rt, req, out)
         out.flush()
     return 0
 

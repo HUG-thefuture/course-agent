@@ -138,7 +138,8 @@ class _FidelityOut:
 
 def fidelity_check(llm: BaseLLM, sections: list[SectionOutput],
                    pcfg: PipelineConfig) -> _FidelityOut:
-    """抽样让模型核对生成内容是否忠于原文。每节抽查若干条。"""
+    """抽样让模型核对生成内容是否忠于原文。每节抽查 fidelity_sample 条。"""
+    sample = max(1, int(getattr(pcfg, "fidelity_sample", 2) or 2))
     total = 0
     supported = 0
     issues: list[str] = []
@@ -146,11 +147,9 @@ def fidelity_check(llm: BaseLLM, sections: list[SectionOutput],
         if not sec.exercises and not sec.knowledge_points:
             continue
         items = []
-        if sec.knowledge_points:
-            kp = sec.knowledge_points[0]
+        for kp in sec.knowledge_points[:sample]:
             items.append({"kind": "知识点", "content": kp.title + "：" + kp.detail})
-        if sec.exercises:
-            ex = sec.exercises[0]
+        for ex in sec.exercises[:sample]:
             item = {"kind": "习题", "content": ex.question, "answer": ex.answer}
             if ex.type == "single_choice" and ex.options:
                 # 选择题自洽：检查标称答案字母对应的选项是否真的正确

@@ -49,7 +49,8 @@ class TutorAgent:
         """关键词路由。返回 (分支, 主题)。"""
         m = message
         rules = [
-            ("G", ("和", "与"), True),   # A 和 B 课程关系（需含"课程"）
+            ("G", ("跨课程", "课程之间", "课程间", "多门课程", "几门课",
+                   "所有课程", "课程整合", "整合复习"), False),
             ("C", ("不太会", "不会", "卡在", "薄弱", "查漏"), False),
             ("E", ("学习路径", "怎么开始", "怎么学", "规划", "从零", "路线"), False),
             ("D", ("体系", "知识地图", "什么关系", "串联"), False),
@@ -65,8 +66,10 @@ class TutorAgent:
         return "A", m
 
     # ------------------------------------------------------------ 工具
-    def _llm(self, system: str, user: str, max_tokens: int = 3072) -> str:
-        return self.llm.chat(system, user, temperature=0.4, max_tokens=max_tokens)
+    def _llm(self, system: str, user: str, max_tokens: int = 3072,
+             temperature: float = 0.4) -> str:
+        return self.llm.chat(system, user, temperature=temperature,
+                             max_tokens=max_tokens)
 
     def _search_block(self, rows: list[dict]) -> str:
         parts = []
@@ -133,13 +136,6 @@ class TutorAgent:
             exs = data.get("exercises") or []
         except (ValueError, TypeError):
             exs = []
-        # 编程题补在线测试（可执行断言，按参考实现生成）
-        for e in exs:
-            if e.get("kind") == "coding" and not e.get("tests") and e.get("language"):
-                try:
-                    from .pipeline.executor import _generate_coding  # noqa
-                except Exception:
-                    pass
         return {"branch": "B", "exercises": exs[:n],
                 "citations": self._citations(rows),
                 "note": "出题完成。请逐题作答（编程题粘贴代码可点在线测试）；"

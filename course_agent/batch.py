@@ -26,7 +26,7 @@ from .memory import Memory
 from .outputs import write_all
 from .pipeline.models import Material, Segment
 from .pipeline.orchestrator import Orchestrator
-from .utils import slugify, truncate
+from .utils import safe_read_text, slugify, truncate
 
 _log = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ def discover_items(inputs: list[str]) -> list[BatchItem]:
                 _log.warning("目录中没有可识别的课程素材: %s", p)
         elif p.is_file() and p.suffix.lower() in _MANIFEST_EXTS:
             if p.suffix.lower() == ".json":
-                data = json.loads(p.read_text(encoding="utf-8"))
+                data = json.loads(safe_read_text(p))
                 rows = data if isinstance(data, list) else data.get("courses", [])
                 for row in rows:
                     if isinstance(row, str):
@@ -85,7 +85,7 @@ def discover_items(inputs: list[str]) -> list[BatchItem]:
                             title=str(row.get("title") or ""),
                             password=str(row.get("password") or "")))
             else:  # .list：每行 `链接|提取码|标题` 或 `路径|标题` 或裸源
-                for line in p.read_text(encoding="utf-8").splitlines():
+                for line in safe_read_text(p).splitlines():
                     line = line.strip()
                     if line and not line.startswith("#"):
                         items.extend(_parse_manifest_line(line))
@@ -119,21 +119,32 @@ def _title_from_source(source: str) -> str:
 
 
 def _transcribe_cached(path: Path, cfg: AgentConfig) -> list[Segment]:
-    """带缓存的转写：同一文件（路径+大小+mtime）只转写一次。"""
+    """带缓存的转写：同一文件（路径+大小+mtime）只转写一次。
+
+    空结果不缓存（否则瞬时转写异常被放大为永久失败）；缓存文件损坏视为未命中。
+    """
     stat = path.stat()
     key = hashlib.sha1(
         f"{path.resolve()}|{stat.st_size}|{int(stat.st_mtime)}".encode()).hexdigest()[:16]
     cache = Path(cfg.data_dir) / "transcript_cache" / f"{key}.json"
     if cache.is_file():
-        rows = json.loads(cache.read_text(encoding="utf-8"))
-        _log.info("命中转写缓存: %s", cache.name)
-        return [Segment(start=r.get("start"), text=r["text"])
-                for r in rows if r.get("text")]
+        try:
+            rows = json.loads(cache.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            rows = None
+        if rows is not None:
+            _log.info("命中转写缓存: %s", cache.name)
+            return [Segment(start=r.get("start"), text=r["text"])
+                    for r in rows if r.get("text")]
     segs = transcribe_media(path)
+    if not segs:
+        return segs
     cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(
+    tmp = cache.with_suffix(".tmp")
+    tmp.write_text(
         json.dumps([{"start": s.start, "text": s.text} for s in segs],
                    ensure_ascii=False), encoding="utf-8")
+    tmp.replace(cache)
     return segs
 
 
@@ -226,32 +237,26 @@ def run_batch(llm: BaseLLM, cfg: AgentConfig, items: list[BatchItem],
         outdir_of=lambda it, i: out_root / f"{i:02d}-{slugify(it.title or _title_from_source(it.source))}")
 
     # ---- 持续迭代：失败/未达标课程反复重跑，直至全部通过或轮数用尽 ----
-    outcome_map: dict[tuple, BatchOutcome] = {
-        (o.source, o.title): o for o in outcomes}
+    # outcomes 与 items 按下标一一对应（_process_items 每项恰好产出一条），
+    # 重试以索引对齐，避免「标题解析前后不一致」导致失败课程永远匹配不上
     passes_left = max(0, int(cfg.pipeline.retry_until_pass))
     round_no = 0
     while passes_left > 0:
-        pending = [(it, outcome_map[(it.source, it.title)])
-                   for it in items
-                   if (it.source, it.title) in outcome_map
-                   and outcome_map[(it.source, it.title)].status
-                   in ("failed", "qa_failed")]
+        pending = [(i, o) for i, o in enumerate(outcomes)
+                   if o.status in ("failed", "qa_failed")]
         if not pending:
             break
         round_no += 1
         passes_left -= 1
         _log.info("=== 持续迭代第 %d 轮：%d 门未达标，重新生成 ===",
                   round_no, len(pending))
-        retry_items = [it for it, _ in pending]
-        outdir_map = {(it.source, it.title): Path(om.output_dir)
-                      for it, om in pending}
+        retry_items = [items[i] for i, _ in pending]
         retry_outcomes = _process_items(
             cfg, retry_items, out_root, memory, vision_llm, force=True,
             review_llm=review_llm, orch=orch, label=f"迭代{round_no}",
-            outdir_of=lambda it, i: outdir_map[(it.source, it.title)])
-        for ro in retry_outcomes:
-            outcome_map[(ro.source, ro.title)] = ro
-        outcomes = list(outcome_map.values())
+            outdir_of=lambda it, j: Path(pending[j - 1][1].output_dir))
+        for j, ro in enumerate(retry_outcomes):
+            outcomes[pending[j][0]] = ro
 
     counts: dict[str, int] = {}
     for o in outcomes:

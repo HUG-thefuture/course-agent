@@ -52,11 +52,18 @@ def grade_objective(exercise: dict, answer: str) -> tuple[bool, str]:
         r = ref.strip().upper()
         if len(r) == 1 and r in "ABCDEFGH":
             return u == r, f"正确答案 {r}"
-        # 兼容：模型把答案存成了选项文本而非字母——映射回字母再判
-        for i, o in enumerate(opts):
-            if _norm_text(o) and (_norm_text(o) == _norm_text(ref)
-                                  or _norm_text(ref) in _norm_text(o)):
-                return u == "ABCDEFGH"[i], f"正确答案 {'ABCDEFGH'[i]}"
+        # 兼容：模型把答案存成了选项文本而非字母——映射回字母再判。
+        # 先找精确相等的选项；再做唯一包含匹配，避免"正确"/"不正确"子串互吞
+        norm_ref = _norm_text(ref)
+        exact = [i for i, o in enumerate(opts)
+                 if _norm_text(o) and _norm_text(o) == norm_ref]
+        if exact:
+            return u == "ABCDEFGH"[exact[0]], f"正确答案 {'ABCDEFGH'[exact[0]]}"
+        partial = [i for i, o in enumerate(opts)
+                   if _norm_text(o) and norm_ref
+                   and (norm_ref in _norm_text(o) or _norm_text(o) in norm_ref)]
+        if len(partial) == 1:
+            return u == "ABCDEFGH"[partial[0]], f"正确答案 {'ABCDEFGH'[partial[0]]}"
         return u == r[:1], f"正确答案 {ref}"
     if t == "multi_choice":
         u = set(re.findall(r"[A-H]", user.upper()))
@@ -145,6 +152,7 @@ def _find_course(cfg: AgentConfig, cid: str) -> Optional[Path]:
 # ------------------------------------------------------------------ 运行状态
 _RUN_STATE: dict[str, Any] = {"running": False, "log": "", "result": None}
 _RUN_LOCK = threading.Lock()
+_PROGRESS_LOCK = threading.Lock()  # 进度文件读改写互斥（多线程 HTTP + 交卷）
 
 
 def _run_pipeline_async(input_src: str, password: str, title: str, cfg: AgentConfig) -> None:
@@ -158,9 +166,9 @@ def _run_pipeline_async(input_src: str, password: str, title: str, cfg: AgentCon
     log = logging.getLogger("webui.run")
 
     def run():
-        with _RUN_LOCK:
-            _RUN_STATE.update(running=True, log="加载素材…", result=None)
         try:
+            with _RUN_LOCK:
+                _RUN_STATE["log"] = "加载素材…"
             mem = Memory(Path(cfg.data_dir) / "memory.db")
             try:
                 llm = _build_llm(cfg)
@@ -233,10 +241,11 @@ def run_code_tests(code: str, tests: list[str], language: str,
 
     支持 python（本机解释器）与 javascript（需本机 node）；
     每条断言独立运行，返回逐条通过/失败与输出。
+    超时杀整棵进程树；提前 exit() 会被前置防护拦下（否则断言被跳过误判通过）。
     """
     import shutil
-    import subprocess
-    import tempfile
+
+    from .sandbox import _JS_GUARD, _PY_GUARD
 
     if language == "python":
         runner = [sys.executable]
@@ -249,31 +258,40 @@ def run_code_tests(code: str, tests: list[str], language: str,
     results = []
     for i, test in enumerate(tests):
         script = code.rstrip() + "\n\n" + test + "\n"
-        if language == "javascript":
+        if language == "python":
+            script = _PY_GUARD + script
+        else:
             # node 无内置 assert，注入与浏览器约定一致的断言垫片
             script = ("function assert(cond, msg) { if (!cond) "
                       "throw new Error('AssertionError' + (msg ? ': ' + msg : '')); }\n"
-                      + script)
-        fd, tmp = tempfile.mkstemp(suffix=".py" if language == "python" else ".js")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(script)
-            try:
-                proc = subprocess.run([*runner, tmp], capture_output=True,
-                                      text=True, timeout=timeout,
-                                      encoding="utf-8", errors="replace")
-                ok = proc.returncode == 0
-                out = (proc.stderr or proc.stdout or "").strip()
-                results.append({"idx": i, "test": test, "passed": ok,
-                                "output": truncate(out, 400)})
-            except subprocess.TimeoutExpired:
-                results.append({"idx": i, "test": test, "passed": False,
-                                "output": f"超时（>{timeout}s），检查是否存在死循环"})
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+                      + _JS_GUARD + script)
+        results.append(_exec_test(runner, script, language, timeout, i, test))
     passed = sum(1 for r in results if r["passed"])
     return {"runnable": True, "results": results,
             "passed": passed, "total": len(results)}
+
+
+def _exec_test(runner: list, script: str, language: str, timeout: int,
+               i: int, test: str) -> dict:
+    """把单条断言脚本写入临时文件执行并返回判题结果。"""
+    import tempfile
+
+    from .sandbox import run_process
+
+    fd, tmp = tempfile.mkstemp(suffix=".py" if language == "python" else ".js")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(script)
+        rc, out, err, timed_out = run_process([*runner, tmp], timeout=timeout)
+        if timed_out:
+            return {"idx": i, "test": test, "passed": False,
+                    "output": f"超时（>{timeout}s），检查是否存在死循环"}
+        ok = rc == 0
+        out = (err or out or "").strip()
+        return {"idx": i, "test": test, "passed": ok,
+                "output": truncate(out, 400)}
+    finally:
+        Path(tmp).unlink(missing_ok=True)
 
 
 def _backfill_tests(llm, exercise: dict, starter_code: str = "",
@@ -407,7 +425,9 @@ def _load_progress(cfg: AgentConfig, cid: str) -> dict:
 def _save_progress(cfg: AgentConfig, cid: str, data: dict) -> None:
     p = _progress_path(cfg, cid)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp = p.with_suffix(".tmp")  # 原子替换：写一半被读不会得到空进度
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(p)
 
 
 # ------------------------------------------------------------------ HTTP
@@ -437,7 +457,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _body(self) -> dict:
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            return {}
         if n <= 0:
             return {}
         try:
@@ -568,16 +591,25 @@ class Handler(BaseHTTPRequestHandler):
                 cid = body.get("course", "")
                 if not cid:
                     return self._json({"error": "course required"}, 400)
-                data = _load_progress(self.cfg, cid)
-                data.update(body.get("data") or {})
-                _save_progress(self.cfg, cid, data)
+                inc = body.get("data") or {}
+                with _PROGRESS_LOCK:
+                    data = _load_progress(self.cfg, cid)
+                    for k, v in inc.items():
+                        if k == "sections" and isinstance(v, dict) \
+                                and isinstance(data.get("sections"), dict):
+                            data["sections"].update(v)  # 深合并：只更新提交的章
+                        else:
+                            data[k] = v
+                    _save_progress(self.cfg, cid, data)
                 return self._json({"ok": True})
             if u.path == "/api/run":
                 src = (body.get("input") or "").strip()
                 if not src:
                     return self._json({"error": "input required"}, 400)
-                if _RUN_STATE["running"]:
-                    return self._json({"error": "已有任务在运行，请稍候"}, 409)
+                with _RUN_LOCK:  # 检查与置位同一临界区，防双击双启动
+                    if _RUN_STATE["running"]:
+                        return self._json({"error": "已有任务在运行，请稍候"}, 409)
+                    _RUN_STATE.update(running=True, log="加载素材…", result=None)
                 _run_pipeline_async(src, body.get("password", ""),
                                     body.get("title", ""), self.cfg)
                 return self._json({"ok": True})
@@ -623,14 +655,14 @@ class Handler(BaseHTTPRequestHandler):
                     results.append({"idx": i, "correct": None, "score": None,
                                     "note": f"评分服务不可用：{llm_err}",
                                     "reference": ex.get("answer", "")})
-        # 记入进度
-        prog = _load_progress(self.cfg, cid)
-        sec_prog = prog.setdefault("sections", {}).setdefault(str(si), {})
-        for r in results:
-            sec_prog[str(r["idx"])] = {"user": answers[r["idx"]] if r["idx"] < len(answers) else "",
-                                       "score": r["score"], "correct": r["correct"]}
-        prog.setdefault("sections", {})[str(si)] = sec_prog
-        _save_progress(self.cfg, cid, prog)
+        # 记入进度（与 /api/progress、其他交卷请求互斥）
+        with _PROGRESS_LOCK:
+            prog = _load_progress(self.cfg, cid)
+            sec_prog = prog.setdefault("sections", {}).setdefault(str(si), {})
+            for r in results:
+                sec_prog[str(r["idx"])] = {"user": answers[r["idx"]] if r["idx"] < len(answers) else "",
+                                           "score": r["score"], "correct": r["correct"]}
+            _save_progress(self.cfg, cid, prog)
         graded = [r for r in results if r["score"] is not None]
 
         # 交卷后自动生成：逐题解析 + 薄弱点强化知识 + 复习建议（追加到 强化复习.md）
@@ -729,6 +761,7 @@ pre{white-space:pre-wrap;word-break:break-word;background:#111827;padding:14px;b
 const $=s=>document.querySelector(s);const $$=s=>document.querySelectorAll(s);
 let COURSE=null,DATA=null;
 function h(s){return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;")}
+function js(s){return (s||"").replace(/\\/g,"\\\\").replace(/'/g,"\\'").replace(/"/g,"&quot;")}
 function show(t){["courses","course","run"].forEach(x=>{$("#nav-"+(x==="course"?"courses":x))?.classList.toggle("on",x!=="run"&&t!=="run");$("#view-"+x).classList.toggle("hide",x!==t)});if(t==="courses")loadCourses()}
 async function api(u,opt){const r=await fetch(u,opt);return r.json()}
 
@@ -738,7 +771,7 @@ async function loadCourses(){
    d.courses.map(c=>`<tr><td>${h(c.title)}</td>
    <td class="${c.passed?'ok':'bad'}">${c.passed?'通过':'未过'} ${c.score}</td>
    <td class="dim">${c.sections} 章 / ${c.exercises} 题</td>
-   <td><button class="pri" onclick="openCourse('${c.id}')">进入</button></td></tr>`).join("")+
+   <td><button class="pri" onclick="openCourse('${js(c.id)}')">进入</button></td></tr>`).join("")+
    `</table>`;
 }
 async function openCourse(id){

@@ -25,21 +25,27 @@ _POLL = 120
 _STALL_MINUTES = 40  # 距上次进展超过该分钟数才放弃（大课一门可达 20 分钟）
 
 
-def _ps(command: str, timeout: int = 60) -> str:
-    out = subprocess.run(["powershell", "-NoProfile", "-Command", command],
-                         capture_output=True, text=True, timeout=timeout)
-    return out.stdout
+def _ps(command: str, timeout: int = 60) -> str | None:
+    """查询失败（偶发超时/启动失败）返回 None，调用方保守跳过本轮。"""
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", command],
+                             capture_output=True, text=True, timeout=timeout)
+        return out.stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return None
 
 
-def batch_pids(match: str) -> list[int]:
+def batch_pids(match: str) -> list[int] | None:
     out = _ps("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
               f"Where-Object {{ $_.CommandLine -match '{match}' }} | "
               "Select-Object -ExpandProperty ProcessId")
+    if out is None:
+        return None
     return [int(x) for x in out.split() if x.strip().isdigit()]
 
 
 def partition_done(cfg: dict, work_file: Path) -> int:
-    out_root = Path(cfg.get("output_dir", "output"))
+    out_root = ROOT / cfg.get("output_dir", "output")  # 锚定项目根，不随 CWD 漂移
     done = {d.parent.name.split("-", 1)[-1] for d in out_root.rglob("session.json")}
     n = 0
     for line in work_file.read_text(encoding="utf-8").splitlines():
@@ -67,10 +73,10 @@ def cfg_out(cfg: dict) -> str:
     return cfg.get("output_dir", "output")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="出题流水线总指挥")
     ap.add_argument("--work-dir", default="data")
-    args = ap.parse_args([])
+    args = ap.parse_args(argv)
 
     cfg = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
     data_dir = ROOT / args.work_dir
@@ -106,6 +112,9 @@ def main() -> int:
                 continue
             all_settled = False
             pids = batch_pids(f"work_{k}.list")
+            if pids is None:
+                print(f"[{k}] 进程查询失败，本轮跳过（保守不重启不放弃）", flush=True)
+                continue
             if pids:
                 if done > st.get("progress", 0):  # 有进展即刷新时间戳
                     st["progress"] = done
@@ -123,10 +132,13 @@ def main() -> int:
                 print(f"[{k}] {int((now - st['last_progress_ts'])/60)} 分钟无进展，放弃该分区",
                       flush=True)
                 continue
-            st["progress"] = max(st.get("progress", 0), done)
             if done > st.get("progress", 0):
+                # 进程死亡期间取得的进展同样刷新时间窗（先更新再比较恒 False 的写法已废弃）
+                st["progress"] = done
                 st["last_progress_ts"] = now
-            st.setdefault("last_progress_ts", now)
+            else:
+                st.setdefault("last_progress_ts", now)
+            print(f"[{k}] 重启分区（已完成 {done}/{total}）", flush=True)
             print(f"[{k}] 重启分区（已完成 {done}/{total}）", flush=True)
             spawn(w, data_dir, cfg)
             time.sleep(5)

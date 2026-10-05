@@ -139,9 +139,10 @@ def main(argv: list[str]) -> int:
             continue
         try:
             r = harvest_one(c)
+            rows = r.pop("rows", [])  # 先弹出再合并：report 不内嵌全量逐字稿
             entry.update(r)
-            if r["status"] == "ok" and r["rows"]:
-                dest.write_text(json.dumps(r.pop("rows"), ensure_ascii=False, indent=1),
+            if r["status"] == "ok" and rows:
+                dest.write_text(json.dumps(rows, ensure_ascii=False, indent=1),
                                 encoding="utf-8")
                 entry["file"] = str(dest)
             stats[r["status"]] = stats.get(r["status"], 0) + 1

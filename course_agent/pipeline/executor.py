@@ -88,10 +88,12 @@ def _parse_notes(data) -> tuple[list[KnowledgePoint], list[KeyNode], list]:
     return kps, nodes, expansions
 
 
-def _parse_exercises(data) -> tuple[list[Exercise], list[str]]:
+def _parse_exercises(data, allow_empty: bool = False) -> tuple[list, list[str]]:
+    """解析习题列表。allow_empty：允许合法的空列表（纯理论章节的编程题按
+    coding_practice 提示词约定可输出 {"exercises": []}，不应视为失败）。"""
     if not isinstance(data, dict) or not isinstance(data.get("exercises"), list):
         raise ValueError("输出必须含 exercises 数组")
-    out: list[Exercise] = []
+    out: list = []
     problems: list[str] = []
     for i, item in enumerate(data["exercises"]):
         if not isinstance(item, dict):
@@ -103,7 +105,10 @@ def _parse_exercises(data) -> tuple[list[Exercise], list[str]]:
             continue
         out.append(exercise_from_dict(item))
     if not out:
-        raise ValueError("没有合法习题: " + "；".join(problems[:3]))
+        if allow_empty and not problems:
+            return [], []
+        detail = "；".join(problems[:3]) if problems else "exercises 为空数组"
+        raise ValueError("没有合法习题: " + detail)
     return out, problems
 
 
@@ -119,7 +124,8 @@ def _generate_coding(llm: BaseLLM, course_title: str, section_title: str,
             prompt += f"\n【修正要求】上一次输出问题：{last_err}，请修正后严格按 JSON 重新输出。"
         try:
             raw = llm.chat(prompt, "请只输出 JSON。", max_tokens=budget)
-            coding, problems = _parse_exercises(extract_json(raw))
+            coding, problems = _parse_exercises(extract_json(raw),
+                                                 allow_empty=True)
             if problems:
                 _log.info("章节「%s」编程题 %d 道未通过校验被丢弃",
                           truncate(section_title, 20), len(problems))

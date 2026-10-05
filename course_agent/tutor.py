@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
@@ -30,26 +29,36 @@ def _print_citations(cits: list[dict]) -> None:
               f"{c.get('section', '')[:20]}{t} |")
 
 
-def _grade_interactive(agent: TutorAgent, ex: dict, answer: str) -> None:
-    """判一道题并输出双擎规范批改。"""
+_TF_POS = {"对", "正确", "是", "true", "t", "√", "yes", "y"}
+_TF_NEG = {"错", "错误", "否", "false", "f", "×", "x", "no", "n"}
+
+
+def _tf_norm(s: str) -> str:
+    """判断题答案归一化：对/正确/是/true 等同义映射，避免方向漏判。"""
+    v = str(s).strip().lower().replace("判断:", "")
+    if v in _TF_POS:
+        return "对"
+    if v in _TF_NEG:
+        return "错"
+    return v
+
+
+def _grade_interactive(agent: TutorAgent, ex: dict, answer: str):
+    """判一道题并输出双擎规范批改。返回 (correct, kp)；无法判定时 correct 为 None。"""
     kind = ex.get("kind", "")
     correct = None
     detail = ""
-    seconds = 5.0
     if kind == "single_choice":
         u = answer.strip().upper()[:1]
         correct = u == str(ex.get("answer", "")).strip().upper()[:1]
         detail = f"正确答案 {ex.get('answer')}"
     elif kind == "true_false":
-        u = answer.strip()
-        r = str(ex.get("answer", "")).strip()
-        correct = (u == r) or (u == "对" and r in ("正确", "是")) \
-            or (u == "错" and r in ("错误", "否"))
-        detail = f"正确答案 {r}"
+        correct = _tf_norm(answer) == _tf_norm(str(ex.get("answer", "")))
+        detail = f"正确答案 {ex.get('answer')}"
     elif kind == "fill_blank":
         u = answer.strip()
         r = str(ex.get("answer", "")).strip()
-        correct = u == r or r in u
+        correct = bool(r) and (u == r or r in u)
         detail = f"参考答案 {r}"
     elif kind == "coding":
         lang = ex.get("language") or "python"
@@ -65,12 +74,7 @@ def _grade_interactive(agent: TutorAgent, ex: dict, answer: str) -> None:
                 print(f"  {mark} 断言{r['idx'] + 1}{out}")
     else:  # short_answer 等：AI 评审
         try:
-            d = agent._llm(json.dumps({
-                "role_check": True,
-                "question": ex.get("question", ""),
-                "reference": ex.get("answer", ""),
-                "user": answer}, ensure_ascii=False)
-                if False else
+            d = agent._llm(
                 "你是阅卷老师。对照参考答案评审学生回答，只输出 JSON："
                 '{"score": 0-100, "verdict": "掌握|部分掌握|未掌握", '
                 '"feedback": "一句话点评"}\n\n'
@@ -90,6 +94,7 @@ def _grade_interactive(agent: TutorAgent, ex: dict, answer: str) -> None:
         print(f"**解析：** {detail}")
     kp = ex.get("kp") or ex.get("question", "")[:20]
     print(f"**关联知识点：** {kp}")
+    return correct, kp
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -164,9 +169,20 @@ def main(argv: list[str] | None = None) -> int:
                     print("（跳过）")
                     continue
                 try:
-                    _grade_interactive(agent, ex, ans)
+                    correct, kp = _grade_interactive(agent, ex, ans)
                 except (LLMError, ValueError) as e:
                     print(f"⚠️ 评审失败：{e}")
+                    continue
+                # 作答接入 SM-2 复习调度与学习状态（供图谱路径校验用）
+                if correct is not None:
+                    try:
+                        agent.review.record(kp, kp, ex.get("question", ""), ans,
+                                            bool(correct))
+                        agent.review.save()
+                        if correct:
+                            agent.learned.add(kp)
+                    except Exception as e:  # 复习状态失败不影响做题
+                        print(f"（复习状态未记录：{e}）")
                 print()
             print("本章完成。需要「查漏补缺」或「下一章」随时说。")
         else:

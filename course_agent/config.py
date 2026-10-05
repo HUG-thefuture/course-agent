@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -141,22 +142,37 @@ def load_config(path: str | Path | None = None) -> AgentConfig:
     return cfg
 
 
+def _mask(key: str) -> str:
+    return (key[:4] + "***") if key else ""
+
+
 def masked_config(cfg: AgentConfig) -> dict[str, Any]:
+    """输出可打印的配置：所有密钥字段一律脱敏。"""
     d = asdict(cfg)
-    key = cfg.api_key_effective
-    d["api"]["api_key"] = (key[:4] + "***") if key else ""
+    d["api"]["api_key"] = _mask(cfg.api_key_effective)
+    d["vision"]["api_key"] = _mask(cfg.vision_key_effective)
+    d["local"]["api_key"] = _mask(cfg.local.api_key)
+    for i, p in enumerate(cfg.providers):
+        d["providers"][i]["api_key"] = _mask(p.api_key)
     return d
 
 
 def _ping(base_url: str, timeout: float = 3.0) -> tuple[bool, str]:
-    """探测 OpenAI 兼容服务是否可达（GET /models）。"""
+    """探测 OpenAI 兼容服务是否可达（GET /models）。
+
+    401/403 说明服务在线但端点要求认证（/models 常需 Bearer），视为可达。
+    """
     url = base_url.rstrip("/") + "/models"
     try:
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
         return True, body[:500]
-    except Exception as e:  # 网络/超时/HTTP 错误都归为不可达
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return True, f"可达（端点需认证，HTTP {e.code}）"
+        return False, f"HTTP {e.code}"
+    except Exception as e:  # 网络/超时归为不可达
         return False, str(e)
 
 

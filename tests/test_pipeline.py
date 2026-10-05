@@ -311,5 +311,41 @@ class TestExecutor(unittest.TestCase):
             generate_section(MockLLM(), "课", psec, [Chunk(0, "t")], PipelineConfig())
 
 
+class TestPromptsRender(unittest.TestCase):
+    def test_user_content_braces_preserved(self):
+        # 素材里的 {{message}}（Vue 插值）与未填充占位符要区别对待
+        from course_agent.prompts import render
+        out = render("think", title="Vue 课", chunk_count=1, total_chars=10,
+                     has_timestamps="false", partial_note="",
+                     feedback='模板插值是 {{message}}，f-string 转义写 f"{{}}"')
+        self.assertIn("{{message}}", out)
+        self.assertIn('f"{{}}"', out)
+
+    def test_unfilled_placeholder_removed(self):
+        from course_agent.prompts import render
+        out = render("think", title="课", chunk_count=1, total_chars=10,
+                     has_timestamps="false", partial_note="x")
+        self.assertNotIn("{{feedback}}", out)
+        self.assertNotIn("{{", out)
+
+
+class TestParseExercisesAllowEmpty(unittest.TestCase):
+    def test_empty_list_allowed_for_coding(self):
+        # 纯理论章节按 coding_practice 约定输出 {"exercises": []}，不应报错重试
+        from course_agent.pipeline.executor import _parse_exercises
+        out, problems = _parse_exercises({"exercises": []}, allow_empty=True)
+        self.assertEqual((out, problems), ([], []))
+
+    def test_empty_list_rejected_by_default(self):
+        from course_agent.pipeline.executor import _parse_exercises
+        with self.assertRaises(ValueError):
+            _parse_exercises({"exercises": []})
+
+    def test_invalid_items_still_retry(self):
+        from course_agent.pipeline.executor import _parse_exercises
+        with self.assertRaises(ValueError):
+            _parse_exercises({"exercises": [{"type": "bogus"}]}, allow_empty=True)
+
+
 if __name__ == "__main__":
     unittest.main()

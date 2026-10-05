@@ -78,6 +78,7 @@ def main(argv: list[str]) -> int:
             pass
         try:
             title = ""
+            last_err = "模型返回空标题"  # 三次都成功解析但 title 为空时也能报告
             for attempt in range(3):  # 与批量任务共用本地大模型时可能排队超时，重试
                 try:
                     title = suggest_title(llm, src, cur_title)

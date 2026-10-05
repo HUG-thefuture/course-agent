@@ -25,6 +25,20 @@ class TestGradeObjective(unittest.TestCase):
         self.assertFalse(grade_objective(ex, "A")[0])
         self.assertFalse(grade_objective(ex, "ABC")[0])
 
+    def test_single_choice_text_options_no_substring_swallow(self):
+        # 答案存成选项文本时的回退映射：精确匹配优先，
+        # "正确"/"不正确" 这种互为子串的选项不得误判
+        ex = {"type": "single_choice", "answer": "正确",
+              "options": ["不正确", "正确"]}
+        ok, note = grade_objective(ex, "B")
+        self.assertTrue(ok)
+        self.assertIn("B", note)
+        self.assertFalse(grade_objective(ex, "A")[0])
+        # 唯一包含匹配仍可用
+        ex2 = {"type": "single_choice", "answer": "对 HTTP 响应码",
+               "options": ["HTTP 请求头", "HTTP 响应码", "TCP 端口"]}
+        self.assertTrue(grade_objective(ex2, "B")[0])
+
     def test_true_false_variants(self):
         ex = {"type": "true_false", "answer": "对"}
         self.assertTrue(grade_objective(ex, "对")[0])

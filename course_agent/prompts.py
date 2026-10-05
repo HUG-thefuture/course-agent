@@ -17,17 +17,25 @@ class PromptError(Exception):
 
 
 def render(name: str, **kwargs: Any) -> str:
-    """加载模板并替换 {{var}}；未提供的占位符替换为空串。"""
+    """加载模板并替换 {{var}}；未提供的占位符替换为空串。
+
+    单趟正则替换：注入的变量值不会被再次扫描——课程素材里合法出现的
+    {{message}}（Vue 插值）、f"{{}}"（f-string 转义）等内容原样保留。
+    """
     if name not in _ALLOWED:
         raise PromptError(f"未知提示词模板: {name}")
     path = _PROMPT_DIR / f"{name}.md"
     if not path.is_file():
         raise PromptError(f"提示词文件缺失: {path}")
     text = path.read_text(encoding="utf-8")
-    for k, v in kwargs.items():
-        text = text.replace("{{" + k + "}}", str(v if v is not None else ""))
-    text = re.sub(r"\{\{\w+\}\}", "", text)  # 清理未填充的占位符
-    return text
+
+    def _sub(m: re.Match) -> str:
+        k = m.group(1)
+        if k in kwargs and kwargs[k] is not None:
+            return str(kwargs[k])
+        return ""  # 未提供的占位符
+
+    return re.sub(r"\{\{(\w+)\}\}", _sub, text)
 
 
 def task_marker(rendered: str) -> str:

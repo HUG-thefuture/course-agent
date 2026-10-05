@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 INTERVALS = [1, 3, 7, 14, 30, 60]
+BLOOM_LEVELS = ["记忆", "理解", "应用", "分析"]
 _FAST = 1.3
 _SLOW_LIMIT = 8.0  # 秒：超过视为"慢"
 
@@ -40,8 +41,13 @@ def sm2_next(card: dict, quality: int, seconds: float) -> dict:
         card["interval"] = interval
         card["reps"] = card.get("reps", 0) + 1
         card["streak"] = streak
-        if streak >= 3:
-            card["bloom"] = card.get("next_bloom") or card.get("bloom", "理解")
+        # 每连续答对 3 次晋升一级 Bloom 层级（记忆→理解→应用→分析）
+        if streak > 0 and streak % 3 == 0:
+            cur = card.get("bloom", "记忆")
+            idx = BLOOM_LEVELS.index(cur) if cur in BLOOM_LEVELS else 0
+            if idx < len(BLOOM_LEVELS) - 1:
+                card["bloom"] = BLOOM_LEVELS[idx + 1]
+                card["next_bloom"] = card["bloom"]
     card["ease"] = round(min(3.0, max(1.3, card.get("ease", 2.5) + (0.1 if q >= 4 else -0.2))), 2)
     card["due"] = _now() + card["interval"] * 86400
     card["last"] = _now()

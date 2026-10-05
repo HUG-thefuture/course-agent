@@ -49,10 +49,15 @@ class TestTokenizeSimilarity(unittest.TestCase):
 
     def test_empty(self):
         self.assertEqual(similarity("", "abc"), 0.0)
-        self.assertEqual(tokenize(""), set())
+        self.assertEqual(tokenize(""), [])
 
     def test_english_word(self):
         self.assertIn("spring", tokenize("Spring Boot 教程"))
+
+    def test_token_freq_preserved(self):
+        # tokenize 返回列表保留重复项，BM25 词频才有效
+        self.assertEqual(tokenize("向量数据库 向量数据库 向量索引").count("向量"),
+                         3)
 
 
 class TestMisc(unittest.TestCase):

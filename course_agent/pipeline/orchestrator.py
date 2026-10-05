@@ -186,7 +186,8 @@ class Orchestrator:
             _log.info("已沉淀 %d 个章节范例到记忆库", len(sections))
         elif self.memory is not None:
             self.memory.save_session(session_id, course_title, material.source,
-                                     1 if passed else 0, float(qa.score))
+                                     1 if passed else 0,
+                                     float(qa.score) if qa else 0.0)
         return result
 
 

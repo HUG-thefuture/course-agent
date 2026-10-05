@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -27,22 +28,27 @@ _LETTERS = "ABCDEFGH"
 
 
 def check_choice(llm, ex: dict) -> str | None:
-    """让模型判定正确选项字母；无法判定返回 None。"""
+    """让模型判定正确选项字母；无法判定返回 None。多选题返回排序后的全部字母。"""
     opts = ex.get("options") or []
     if not opts:
         return None
+    multi = ex.get("type") == "multi_choice"
     opt_lines = "\n".join(f"{_LETTERS[i]}. {o}" for i, o in enumerate(opts))
+    extra = ("本题是多选题，answer 填所有正确选项字母（如 \"ACD\"）。"
+             if multi else "")
     prompt = (
         "你是阅卷老师。判断下面选择题的正确选项。\n"
         f"【题目】{ex.get('question', '')}\n【选项】\n{opt_lines}\n"
         "只输出 JSON：{\"answer\": \"正确选项字母\"}\n"
         "注意：如果多个选项都含正确表述，选表述最准确、最完整的一个；"
-        "如果题目本身有问题（无正确选项），answer 填 \"?\"。"
+        "如果题目本身有问题（无正确选项），answer 填 \"?\"。" + extra
     )
     raw = llm.chat(prompt, "请只输出 JSON。", temperature=0, max_tokens=1024)
     data = extract_json(raw)
-    ans = str(data.get("answer", "")).strip().upper()[:1]
-    return ans if ans in _LETTERS else None
+    letters = re.findall(r"[A-H]", str(data.get("answer", "")).upper())
+    if multi:
+        return "".join(sorted(set(letters))) or None
+    return letters[0] if letters else None
 
 
 def main(argv: list[str]) -> int:
@@ -78,14 +84,21 @@ def main(argv: list[str]) -> int:
                     print(f"[{d.name[:34]}] 调用失败: {truncate(str(e), 70)}", flush=True)
                     time.sleep(2)
                     continue
-                if truth and truth != "?" and truth != str(e.get("answer", "")).strip().upper():
-                    old = str(e.get("answer", ""))
-                    e["answer"] = truth
-                    e["explanation"] = (f"（答案经复核修正：原 {old} → {truth}）"
-                                        + str(e.get("explanation", "")))[:400]
-                    changed += 1
-                    print(f"  修正: {truncate(e.get('question', ''), 26)} {old} -> {truth}",
-                          flush=True)
+                if truth and truth != "?":
+                    stored = str(e.get("answer", "")).strip().upper()
+                    if e.get("type") == "multi_choice":
+                        same = truth == "".join(
+                            sorted(set(re.findall(r"[A-H]", stored))))
+                    else:
+                        same = truth == stored
+                    if not same:
+                        old = str(e.get("answer", ""))
+                        e["answer"] = truth
+                        e["explanation"] = (f"（答案经复核修正：原 {old} → {truth}）"
+                                            + str(e.get("explanation", "")))[:400]
+                        changed += 1
+                        print(f"  修正: {truncate(e.get('question', ''), 26)} {old} -> {truth}",
+                              flush=True)
                 time.sleep(0.3)
         if changed:
             secs_path.write_text(json.dumps(secs, ensure_ascii=False, indent=2),

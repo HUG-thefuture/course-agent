@@ -28,13 +28,14 @@ def setup_logging(verbose: bool = False) -> None:
 
 
 def safe_read_text(path: str | Path) -> str:
-    """按 utf-8 / utf-8-sig / gbk 顺序尝试读取文本文件。
+    """按 utf-8-sig / utf-8 / gb18030 顺序尝试读取文本文件。
 
+    utf-8-sig 首位：带 BOM 的文件剥掉 BOM，不带 BOM 的文件解码结果与 utf-8 一致；
     中文 Windows 下常见 GBK 文件，逐一尝试并返回首个成功结果。
     """
     p = Path(path)
     last_err: Exception | None = None
-    for enc in ("utf-8", "utf-8-sig", "gb18030"):
+    for enc in ("utf-8-sig", "utf-8", "gb18030"):
         try:
             return p.read_text(encoding=enc)
         except UnicodeDecodeError as e:
@@ -102,26 +103,28 @@ def extract_json(text: str):
 _TOKEN_RE = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]")
 
 
-def tokenize(text: str) -> set[str]:
-    """中英混合轻量分词：拉丁词 + 中文单字+相邻双字组合，用于相似度召回。"""
+def tokenize(text: str) -> list[str]:
+    """中英混合轻量分词：拉丁词 + 中文单字+相邻双字组合。
+
+    返回列表（保留重复项），调用方需要集合语义时自行 set()；
+    BM25 等需要词频的场景依赖重复项。
+    """
     if not text:
-        return set()
+        return []
     low = text.lower()
-    grams: set[str] = set()
+    toks: list[str] = []
     for w in re.findall(r"[a-z0-9]+", low):
-        grams.add(w)
+        toks.append(w)
     cjk = re.findall(r"[\u4e00-\u9fff]", low)
-    for ch in cjk:
-        grams.add(ch)
-    for a, b in zip(cjk, cjk[1:]):
-        grams.add(a + b)
-    return grams
+    toks.extend(cjk)
+    toks.extend(a + b for a, b in zip(cjk, cjk[1:]))
+    return toks
 
 
 def similarity(query: str, target: str) -> float:
     """基于词元交集的简单相似度（0~1），无需额外依赖。"""
-    q = tokenize(query)
-    t = tokenize(target)
+    q = set(tokenize(query))
+    t = set(tokenize(target))
     if not q or not t:
         return 0.0
     return len(q & t) / min(len(q), len(t))

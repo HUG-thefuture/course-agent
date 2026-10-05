@@ -60,7 +60,8 @@ def build_llm(cfg: AgentConfig, mock: bool = False, source: str = "",
             api_key=cfg.api_key_effective, timeout=cfg.api.timeout,
             max_retries=cfg.api.max_retries)
     clients = [local] + ([api] if api else [])
-    prefer = source or cfg.prefer
+    # --source auto 表示跟随配置文件的 prefer；显式指定时以命令行为准
+    prefer = source if source in ("local", "api") else cfg.prefer
     if prefer == "api" and api is None:
         raise LLMError("指定了 --source api，但外部 API 未启用或未配置密钥")
     return Router(clients, prefer="api" if prefer == "api" else "local")
@@ -189,7 +190,7 @@ def cmd_export_sft(args: argparse.Namespace) -> int:
 
 
 def cmd_batch(args: argparse.Namespace) -> int:
-    """批量处理：目录 / 清单（txt|json）/ 多个链接，逐个转写+整理。"""
+    """批量处理：目录 / 清单（.list|.json）/ 多个链接，逐个转写+整理。"""
     cfg = load_config(args.config)
     setup_logging(args.verbose)
     llm = build_llm(cfg, mock=args.mock, source=args.source)
@@ -197,7 +198,7 @@ def cmd_batch(args: argparse.Namespace) -> int:
     vision_llm = _build_vision_llm(cfg, args.mock)
     items = discover_items(args.input)
     if not items:
-        _log.error("没有发现可处理的课程素材（支持目录/清单.txt/清单.json/URL）")
+        _log.error("没有发现可处理的课程素材（支持目录/清单.list/清单.json/URL）")
         return 1
     if args.retry_until_pass is not None:
         cfg.pipeline.retry_until_pass = args.retry_until_pass
@@ -271,8 +272,10 @@ def cmd_kb_search(args: argparse.Namespace) -> int:
     if args.bm25_only:
         rows = kb.search(args.query, top_k=args.top_k, type_=args.type)
     else:
-        rows = hybrid_search(kb, "data/chromadb", OllamaEmbedder(),
-                             args.query, top_k=args.top_k, type_=args.type)
+        cfg = load_config(args.config)
+        rows = hybrid_search(kb, str(Path(cfg.data_dir) / "chromadb"),
+                             OllamaEmbedder(), args.query,
+                             top_k=args.top_k, type_=args.type)
     if not rows:
         print("无匹配结果")
         return 0
@@ -320,7 +323,10 @@ def cmd_kb_ask(args: argparse.Namespace) -> int:
 
 def cmd_tutor(args: argparse.Namespace) -> int:
     from .tutor import main as tutor_main
-    return tutor_main(["--course-root", args.course_root])
+    argv = ["--course-root", args.course_root]
+    if getattr(args, "config", None):
+        argv += ["--config", args.config]
+    return tutor_main(argv)
 
 
 def cmd_config(args: argparse.Namespace) -> int:
@@ -360,7 +366,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     batch = sub.add_parser("batch", help="批量处理课程（目录/清单/多个链接）")
     batch.add_argument("--input", nargs="+", required=True,
-                       help="目录 / 清单文件(.txt 行格式: 链接|提取码|标题 / .json) / URL / 文件，可混合多个")
+                       help="目录 / 清单文件(.list 行格式: 链接|提取码|标题 / .json) / URL / 文件，可混合多个")
     batch.add_argument("--outdir", default="", help="输出根目录（默认 output/batch）")
     batch.add_argument("--mock", action="store_true", help="使用离线 Mock 模型")
     batch.add_argument("--force", action="store_true", help="忽略已有产物强制重跑")

@@ -88,6 +88,28 @@ class TestMCPServer(unittest.TestCase):
         d = json.loads(r["result"]["content"][0]["text"])
         self.assertEqual(d["status"], "ok")
 
+    def test_survives_batch_array_and_null_params(self):
+        # batch 数组请求 / params=null 不得杀掉服务器（旧实现直接 AttributeError 退出）
+        assert self.proc.stdin
+        self.proc.stdin.write(json.dumps(
+            [{"jsonrpc": "2.0", "id": 7, "method": "ping"},
+             {"jsonrpc": "2.0", "id": 8, "method": "ping"}]) + "\n")
+        self.proc.stdin.flush()
+        r1 = json.loads(self.proc.stdout.readline())
+        r2 = json.loads(self.proc.stdout.readline())
+        self.assertEqual(r1["id"], 7)
+        self.assertEqual(r2["id"], 8)
+        r = self.rpc({"jsonrpc": "2.0", "id": 9, "method": "initialize",
+                      "params": None})
+        self.assertEqual(r["result"]["serverInfo"]["name"], "course-agent-kb")
+        # 服务器仍存活
+        r = self.rpc({"jsonrpc": "2.0", "id": 10, "method": "ping"})
+        self.assertEqual(r["id"], 10)
+
+    def test_unknown_method_error(self):
+        r = self.rpc({"jsonrpc": "2.0", "id": 3, "method": "no/such"})
+        self.assertEqual(r["error"]["code"], -32601)
+
 
 if __name__ == "__main__":
     unittest.main()

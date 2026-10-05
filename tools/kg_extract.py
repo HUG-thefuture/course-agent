@@ -66,6 +66,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--index", default="data/kb_index.json")
     ap.add_argument("--out", default="data/kg.json")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--force", action="store_true",
+                    help="忽略断点记录，全部课程重新抽取")
     args = ap.parse_args(argv)
 
     cfg = load_config()
@@ -92,15 +94,33 @@ def main(argv: list[str]) -> int:
                     course=c.get("course", "")[:40],
                     section=c.get("section", "")[:40],
                     difficulty=2, bloom="理解")
-    title_to_id: dict[str, str] = {}
-    for c in chunks:
-        title_to_id[c.get("title", "")[:40]] = c.get("id", "")
+
+    # 断点续跑：已抽取的课程记入旁车文件，重跑跳过（--force 全量重抽）
+    progress_path = Path(args.out).with_suffix(".progress.json")
+    done_courses: set[str] = set()
+    if progress_path.is_file():
+        try:
+            done_courses = set(json.loads(
+                progress_path.read_text(encoding="utf-8")))
+        except (json.JSONDecodeError, OSError):
+            done_courses = set()
+    if args.force:
+        done_courses.clear()
 
     done_n = fail_n = edges = 0
     for ci, course in enumerate(courses, 1):
+        if course in done_courses:
+            print(f"[{ci}/{len(courses)}] {course[:30]} 已抽取，跳过（--force 重抽）",
+                  flush=True)
+            done_n += 1
+            continue
         blocks = by_course[course]
         try:
             rels = extract_course_relations(llm, course, blocks)
+            # 标题->id 映射限定在本课程内：跨课程同名标题（如"分布式锁的适用边界"
+            # 在多门课重复出现）全局索引会把关系挂到错误课程的知识块上
+            title_to_id = {c.get("title", "")[:40]: c.get("id", "")
+                           for c in blocks}
             for r in rels:
                 src_id = resolve_title(title_to_id, r["src"])
                 dst_id = resolve_title(title_to_id, r["dst"])
@@ -108,6 +128,10 @@ def main(argv: list[str]) -> int:
                     kg.add_edge(src_id, dst_id, r["rel"])
                     edges += 1
             done_n += 1
+            done_courses.add(course)
+            progress_path.write_text(json.dumps(sorted(done_courses),
+                                                ensure_ascii=False),
+                                     encoding="utf-8")
             print(f"[{ci}/{len(courses)}] {course[:30]} -> {len(rels)} 条关系",
                   flush=True)
         except Exception as e:
