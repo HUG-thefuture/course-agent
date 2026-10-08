@@ -761,7 +761,8 @@ pre{white-space:pre-wrap;word-break:break-word;background:#111827;padding:14px;b
 const $=s=>document.querySelector(s);const $$=s=>document.querySelectorAll(s);
 let COURSE=null,DATA=null;
 function h(s){return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;")}
-function js(s){return (s||"").replace(/\\/g,"\\\\").replace(/'/g,"\\'").replace(/"/g,"&quot;")}
+const BSQ=String.fromCharCode(92);
+function js(s){return (s||"").split(BSQ).join(BSQ+BSQ).split("'").join(BSQ+"'").split('"').join("&quot;")}
 function show(t){["courses","course","run"].forEach(x=>{$("#nav-"+(x==="course"?"courses":x))?.classList.toggle("on",x!=="run"&&t!=="run");$("#view-"+x).classList.toggle("hide",x!==t)});if(t==="courses")loadCourses()}
 async function api(u,opt){const r=await fetch(u,opt);return r.json()}
 
