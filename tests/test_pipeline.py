@@ -173,9 +173,18 @@ class TestStructuralCheck(unittest.TestCase):
 
 
 class TestOrchestrator(unittest.TestCase):
-    def _run(self, mock, max_attempts=3):
+    def _cfg(self, **pipeline_kw) -> AgentConfig:
+        # 增量落盘会写 cfg.output_dir——必须指向临时目录，防止测试污染真实 output/
         cfg = AgentConfig()
-        cfg.pipeline.max_attempts = max_attempts
+        td = tempfile.TemporaryDirectory(prefix="ca_test_")
+        self.addCleanup(td.cleanup)
+        cfg.output_dir = td.name
+        for k, v in pipeline_kw.items():
+            setattr(cfg.pipeline, k, v)
+        return cfg
+
+    def _run(self, mock, max_attempts=3):
+        cfg = self._cfg(max_attempts=max_attempts)
         material = load_source(str(EXAMPLE_TXT))
         orch = Orchestrator(mock, cfg)
         return orch.run(material, title="测试直播课")
@@ -227,16 +236,14 @@ class TestOrchestrator(unittest.TestCase):
 
     def test_partial_course_detected(self):
         # 材料字数低于 partial_chars → 按不完整课程处理
-        cfg = AgentConfig()
-        cfg.pipeline.partial_chars = 100000
+        cfg = self._cfg(partial_chars=100000)
         material = load_source(str(EXAMPLE_TXT))
         result = Orchestrator(MockLLM(), cfg).run(material, title="片段")
         self.assertTrue(result.partial)
         self.assertTrue(result.passed)
 
     def test_full_course_not_partial(self):
-        cfg = AgentConfig()
-        cfg.pipeline.partial_chars = 10
+        cfg = self._cfg(partial_chars=10)
         material = load_source(str(EXAMPLE_TXT))
         result = Orchestrator(MockLLM(), cfg).run(material, title="完整")
         self.assertFalse(result.partial)

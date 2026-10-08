@@ -139,9 +139,10 @@ def cmd_demo(args: argparse.Namespace) -> int:
         _log.error("示例文件缺失: %s", example)
         return 1
     material = load_source(str(example))
+    cfg.output_dir = str(Path(cfg.data_dir) / "demo_runs")  # 增量落盘不污染真实 output/
     orch = Orchestrator(MockLLM(), cfg, memory=None)
     result = orch.run(material, title="示例直播课：Spring Boot 事务与并发")
-    outdir = args.outdir or str(Path(cfg.output_dir) / "demo")
+    outdir = args.outdir or str(Path(cfg.data_dir) / "demo_runs" / "demo")
     files = write_all(result, outdir)
     _log.info("离线演示完成（Mock 模型，不调用任何网络）")
     for name in ("notes.md", "key_nodes.md", "exercises.md", "review_report.md"):

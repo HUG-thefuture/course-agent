@@ -74,6 +74,8 @@ class TestRunBatch(unittest.TestCase):
         self.td = Path(self._td.name)
         self.cfg = AgentConfig()
         self.cfg.data_dir = str(self.td / "data")
+        # 增量落盘写 cfg.output_dir——指到临时目录，防止污染真实 output/
+        self.cfg.output_dir = str(self.td / "interim")
         self.cfg.pipeline.partial_chars = 50000  # 示例材料按完整课处理
 
     def tearDown(self):
