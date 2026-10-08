@@ -139,7 +139,6 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 st.setdefault("last_progress_ts", now)
             print(f"[{k}] 重启分区（已完成 {done}/{total}）", flush=True)
-            print(f"[{k}] 重启分区（已完成 {done}/{total}）", flush=True)
             spawn(w, data_dir, cfg)
             time.sleep(5)
         # 持久化状态
