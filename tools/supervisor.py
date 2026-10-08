@@ -61,8 +61,10 @@ def partition_total(work_file: Path) -> int:
 
 
 def spawn(work_file: Path, data_dir: Path, cfg: dict) -> int:
+    # --source local：链首本地 qwen3-8b-16k（GPU 常驻 ~17s/调用）。
+    # 用 api 时远程链（AMD 网关故障窗 / nvidia 76-420s）每调用先白等再回落，吞吐减半。
     cmd = [sys.executable, "main.py", "batch", "--config", "config.json",
-           "--source", "api", "--retry-until-pass", "2",
+           "--source", "local", "--retry-until-pass", "2",
            "--input", str(work_file), "--outdir", str(
                ROOT / cfg.get("output_dir", "output"))]
     proc = subprocess.Popen(cmd, cwd=str(ROOT))
