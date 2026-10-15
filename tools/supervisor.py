@@ -45,12 +45,20 @@ def batch_pids(match: str) -> list[int] | None:
 
 
 def partition_done(cfg: dict, work_file: Path) -> int:
+    """完成数判定。目录名 = {NN}-{slugify(标题)}，而 slugify 截断到 40 字——
+    长标题文件的尾部时间戳会被切掉，整段 stem 匹配不上（2026-10-15 实证：
+    b 区 078-41 已完成却被判缺，每 2 分钟重拉空转）。故同时接受完整 stem
+    与 slugify(stem) 两种后缀。"""
+    from course_agent.utils import slugify
     out_root = ROOT / cfg.get("output_dir", "output")  # 锚定项目根，不随 CWD 漂移
-    done = {d.parent.name.split("-", 1)[-1] for d in out_root.rglob("session.json")}
+    done = {d.parent.name for d in out_root.rglob("session.json")}
     n = 0
     for line in work_file.read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if line and Path(line).stem in done:
+        if not line:
+            continue
+        stem = Path(line).stem
+        if any(d.endswith(stem) or d.endswith(slugify(stem)) for d in done):
             n += 1
     return n
 
@@ -96,6 +104,19 @@ def main(argv: list[str] | None = None) -> int:
             state = json.loads(state_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             state = {}
+    # 新实例启动 = 全新观察窗口：关机数日后遗留的旧 last_progress_ts 会让首轮轮询
+    # 立即判定"停滞>40分钟"而秒放弃全部分区（2026-10-15 实证）。保留完成计数、刷新时间窗。
+    for st in state.values():
+        if isinstance(st, dict):
+            if st.get("gave_up"):
+                print("清除上次运行遗留的放弃标记", flush=True)
+            st["gave_up"] = False
+            if st.get("last_progress_ts"):
+                st["last_progress_ts"] = time.time()
+    for k in work_files:  # 放弃旁车文件同样不可跨重启存活
+        sk = data_dir / f"work_{k}.skipped"
+        if sk.is_file():
+            sk.unlink()
 
     totals = {k: partition_total(w) for k, w in work_files.items()}
     print(f"总指挥启动：分区规模 {totals}（每 {_POLL} 秒轮询）", flush=True)
