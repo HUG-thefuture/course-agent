@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from pathlib import Path
 
 from ..config import AgentConfig
 from ..llm.base import BaseLLM
@@ -72,6 +73,7 @@ class Orchestrator:
 
     def run(self, material: Material, title: str | None = None) -> SessionResult:
         from ..ingest.loader import chunk_material
+        from ..outputs import write_interim  # 延迟导入，避免 outputs<->pipeline 循环
         pcfg = self.cfg.pipeline
         course_title = (title or material.title or "课程").strip()
         chunks = chunk_material(material, pcfg.chunk_chars)
@@ -110,6 +112,7 @@ class Orchestrator:
                     feedback=feedback or "（首轮，无）",
                 ),
                 "请开始分析。",
+                task="think",
             )
             _log.info("思考：%s", truncate(think.replace("\n", " "), 120))
 
@@ -146,9 +149,19 @@ class Orchestrator:
                     _log.info("生成章节：%s", psec.title)
                     caps = self._captions_for_section(
                         frames, plan.sections, si, chunks)
-                    sections.append(generate_section(
+                    sec = generate_section(
                         self.llm, course_title, psec, chunks, pcfg, self.memory,
-                        frame_captions=caps))
+                        frame_captions=caps)
+                    sections.append(sec)
+                    # 增量落盘：已生成的章节立即保存，中断/卡死也不丢进度
+                    try:
+                        write_interim(
+                            Path(self.cfg.output_dir) / session_id,
+                            title=course_title, source=material.source,
+                            session_id=session_id, sections=sections)
+                    except Exception as e:  # 增量保存失败只降级，不阻断主流程
+                        _log.warning("章节「%s」增量保存失败（继续）: %s",
+                                     psec.title, e)
             except ExecuteError as e:
                 rec.qa_issues = [str(e)]
                 attempts.append(rec)

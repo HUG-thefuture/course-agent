@@ -108,7 +108,7 @@ def make_plan(llm: BaseLLM, title: str, chunks: list[Chunk], feedback: str,
             partial_note=partial_note,
             feedback=fb,
         )
-        raw = llm.chat(prompt, "请只输出计划 JSON。")
+        raw = llm.chat(prompt, "请只输出计划 JSON。", task="plan")
         try:
             data = extract_json(raw)
             plan = _normalize(data, pcfg)

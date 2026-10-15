@@ -31,10 +31,15 @@ def _w(path: Path, text: str) -> None:
 
 def _review_md(result: SessionResult) -> str:
     """复习笔记（主文档）：概念+示例+易错点+相关性拓展，独立于视频可复习。"""
-    lines = [f"# {result.title} · 复习笔记", "",
+    return _review_md_from(title=result.title, sections=result.sections)
+
+
+def _review_md_from(title: str, sections) -> str:
+    """复习笔记渲染（支持增量：只传已生成章节的 sections）。"""
+    lines = [f"# {title} · 复习笔记", "",
              "> 本文目标：**不回看视频也能复习掌握**。每个知识点含概念讲解、示例、易错点；",
              "> 文末的「相关拓展」是课程内容之外的关联知识补充，已明确标注。", ""]
-    for sec in result.sections:
+    for sec in sections:
         lines.append(f"## {sec.title}")
         if sec.goals:
             lines.append(f"*学习目标：{'；'.join(sec.goals)}*")
@@ -69,10 +74,16 @@ def _review_md(result: SessionResult) -> str:
 
 
 def _notes_md(result: SessionResult) -> str:
-    lines = [f"# {result.title} · 知识点笔记", "",
-             f"> 来源：{result.source}  ", f"> 会话：{result.session_id}  ",
-             f"> 质检得分：{result.qa.score if result.qa else '-'}", ""]
-    for sec in result.sections:
+    return _notes_md_from(title=result.title, source=result.source,
+                          session_id=result.session_id, sections=result.sections,
+                          qa_score=result.qa.score if result.qa else "-")
+
+
+def _notes_md_from(title, source, session_id, sections, qa_score="-") -> str:
+    lines = [f"# {title} · 知识点笔记", "",
+             f"> 来源：{source}  ", f"> 会话：{session_id}  ",
+             f"> 质检得分：{qa_score}", ""]
+    for sec in sections:
         lines.append(f"## {sec.title}")
         if sec.goals:
             lines.append("**学习目标**：" + "；".join(sec.goals))
@@ -93,9 +104,13 @@ def _notes_md(result: SessionResult) -> str:
 
 
 def _key_nodes_md(result: SessionResult) -> str:
-    lines = [f"# {result.title} · 关键节点速查", "",
+    return _key_nodes_md_from(title=result.title, sections=result.sections)
+
+
+def _key_nodes_md_from(title, sections) -> str:
+    lines = [f"# {title} · 关键节点速查", "",
              "复习时优先回看这些节点：", ""]
-    for sec in result.sections:
+    for sec in sections:
         if not sec.key_nodes:
             continue
         lines.append(f"## {sec.title}")
@@ -107,11 +122,15 @@ def _key_nodes_md(result: SessionResult) -> str:
 
 
 def _exercises_md(result: SessionResult) -> str:
-    lines = [f"# {result.title} · 配套习题", "",
+    return _exercises_md_from(title=result.title, sections=result.sections)
+
+
+def _exercises_md_from(title, sections) -> str:
+    lines = [f"# {title} · 配套习题", "",
              "先作答，再对照文末答案。", ""]
     answers = [""]
     no = 0
-    for sec in result.sections:
+    for sec in sections:
         lines.append(f"## {sec.title}")
         lines.append("")
         for e in sec.exercises:
@@ -213,3 +232,24 @@ def write_all(result: SessionResult, outdir: str | Path) -> dict[str, str]:
     put("session.json", json.dumps(summary, ensure_ascii=False, indent=2))
     _log.info("产物已写入 %s", d)
     return files
+
+
+def write_interim(outdir: str | Path, title: str, source: str,
+                  session_id: str, sections) -> None:
+    """增量落盘：每生成完一个章节就调用一次，把已生成的章节写入产物。
+
+    目的：长耗时的 run 若中途被中断/卡死，已生成的章节不会丢——
+    sections.json 与各 markdown 草稿会随进度持续更新。
+    最终仍由 write_all() 以完整结果（含质检报告/plan.json/session.json）收尾。
+    """
+    d = Path(outdir)
+    d.mkdir(parents=True, exist_ok=True)
+    _w(d / "sections.json", json.dumps(
+        [s.to_dict() for s in sections], ensure_ascii=False, indent=2))
+    _w(d / "review.md", _review_md_from(title=title, sections=sections))
+    _w(d / "notes.md", _notes_md_from(title=title, source=source,
+                                      session_id=session_id,
+                                      sections=sections, qa_score="-"))
+    _w(d / "key_nodes.md", _key_nodes_md_from(title=title, sections=sections))
+    _w(d / "exercises.md", _exercises_md_from(title=title, sections=sections))
+    _log.info("已增量保存 %d 个章节到 %s", len(sections), d)

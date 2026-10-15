@@ -38,7 +38,7 @@ def review_plan(llm: BaseLLM, plan: Plan, chunks: list[Chunk],
         if last_err:
             prompt += f"\n【注意】你上一次的输出无法解析（{last_err}），请严格按 JSON 格式重新输出。"
         try:
-            raw = llm.chat(prompt, "请只输出审查结论 JSON。")
+            raw = llm.chat(prompt, "请只输出审查结论 JSON。", task="review")
             data = extract_json(raw)
             if not isinstance(data, dict) or "passed" not in data:
                 raise ValueError("缺少 passed 字段")

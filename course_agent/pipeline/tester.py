@@ -166,7 +166,7 @@ def fidelity_check(llm: BaseLLM, sections: list[SectionOutput],
         prompt = render("qa_judge", source_text=truncate(source, 3500),
                         items=json.dumps(items, ensure_ascii=False))
         try:
-            raw = llm.chat(prompt, "请只输出质检 JSON。")
+            raw = llm.chat(prompt, "请只输出质检 JSON。", task="qa")
             data = extract_json(raw)
             rows = data.get("items") if isinstance(data, dict) else data
             if not isinstance(rows, list):

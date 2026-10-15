@@ -14,7 +14,7 @@ class BaseLLM(abc.ABC):
 
     @abc.abstractmethod
     def chat(self, system: str, user: str, temperature: float = 0.3,
-             max_tokens: int = 2048) -> str:
+             max_tokens: int = 2048, **kwargs) -> str:
         raise NotImplementedError
 
     @property

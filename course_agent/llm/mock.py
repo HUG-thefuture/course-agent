@@ -49,7 +49,7 @@ class MockLLM(BaseLLM):
         return "mock"
 
     def chat(self, system: str, user: str, temperature: float = 0.3,
-             max_tokens: int = 2048) -> str:
+             max_tokens: int = 2048, **kwargs) -> str:
         self.calls += 1
         # 任务标记与【字段】都在 system（渲染后的模板）里，合并后统一解析
         combined = (system or "") + "\n" + (user or "")

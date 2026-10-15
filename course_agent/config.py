@@ -93,6 +93,9 @@ class AgentConfig:
     review_source: str = "same"    # same / api（用外部模型独立审查，更客观）
     data_dir: str = "data"
     output_dir: str = "output"
+    # 任务难度 -> 模型档位：perf(高性能) / flash(快省)。tiers 为 档位->模型名 列表，
+    # tasks 为 任务名->档位 映射，default 为未列出任务/模型使用的档位。
+    model_tiers: dict = field(default_factory=dict)
 
     @property
     def api_key_effective(self) -> str:
@@ -101,6 +104,21 @@ class AgentConfig:
     @property
     def vision_key_effective(self) -> str:
         return self.vision.api_key or os.environ.get(ENV_API_KEY, "")
+
+    def tier_map(self) -> dict[str, str]:
+        """模型名 -> 档位（从 model_tiers.tiers 派生）。"""
+        out: dict[str, str] = {}
+        for tier, models in ((self.model_tiers or {}).get("tiers") or {}).items():
+            for m in models or []:
+                out[m] = tier
+        return out
+
+    def default_tier(self) -> str:
+        return (self.model_tiers or {}).get("default") or "flash"
+
+    def task_tier(self, task: str) -> str:
+        """任务名 -> 档位；未列出时用 default。"""
+        return ((self.model_tiers or {}).get("tasks") or {}).get(task) or self.default_tier()
 
 
 def _merge(dc_instance: Any, patch: dict[str, Any]) -> Any:
@@ -135,7 +153,7 @@ def load_config(path: str | Path | None = None) -> AgentConfig:
                     ProviderConfig(**{k: v for k, v in row.items()
                                       if k in ProviderConfig.__dataclass_fields__})
                     for row in data["providers"] if isinstance(row, dict)]
-            for k in ("prefer", "review_source", "data_dir", "output_dir"):
+            for k in ("prefer", "review_source", "data_dir", "output_dir", "model_tiers"):
                 if k in data:
                     setattr(cfg, k, data[k])
             break
