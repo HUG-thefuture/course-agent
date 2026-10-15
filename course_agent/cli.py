@@ -29,7 +29,7 @@ from .improve import export_sft, run_improvement
 from .ingest.loader import (AUDIO_EXTS, IngestError, VIDEO_EXTS,
                             classify_url, load_source, resolve_media_url)
 from .ingest.transcriber import TranscribeError, segments_to_srt, transcribe_media
-from .llm import LLMError, MockLLM, OpenAICompatClient, Router
+from .llm import LLMError, MockLLM, OpenAICompatClient, Router, TieredRouter
 from .llm.factory import build_client_chains
 from .memory import Memory
 from .outputs import write_all
@@ -44,6 +44,11 @@ _log = logging.getLogger("course_agent")
 
 def build_llm(cfg: AgentConfig, mock: bool = False, source: str = "",
               model_override: str = ""):
+    """构建 LLM 路由：本地兜底 + 全部云端服务商的所有模型，按任务难度分档。
+
+    配置了 model_tiers 时返回 TieredRouter（按 think/plan/notes 等任务路由到
+    perf/flash 档位）；否则退回普通 Router（[local, cloud...] 故障转移）。
+    """
     if mock:
         return MockLLM()
     local = OpenAICompatClient(
@@ -53,18 +58,22 @@ def build_llm(cfg: AgentConfig, mock: bool = False, source: str = "",
         timeout=cfg.local.timeout,
         max_retries=cfg.local.max_retries,
     )
-    api = None
-    if cfg.api.enabled and cfg.api_key_effective:
-        api = OpenAICompatClient(
-            base_url=cfg.api.base_url, model=cfg.api.model,
-            api_key=cfg.api_key_effective, timeout=cfg.api.timeout,
-            max_retries=cfg.api.max_retries)
-    clients = [local] + ([api] if api else [])
+    # 全量云端链：主 api 块的全部 models + 所有启用服务商的全部 models
+    _, cloud = build_client_chains(cfg)
     # --source auto 表示跟随配置文件的 prefer；显式指定时以命令行为准
     prefer = source if source in ("local", "api") else cfg.prefer
-    if prefer == "api" and api is None:
+    if prefer == "api" and not cloud:
         raise LLMError("指定了 --source api，但外部 API 未启用或未配置密钥")
-    return Router(clients, prefer="api" if prefer == "api" else "local")
+    if cloud and (cfg.model_tiers or prefer == "api"):
+        return TieredRouter(
+            cloud_clients=cloud, local_client=local,
+            tier_map=cfg.tier_map(),
+            task_map=cfg.model_tiers.get("tasks") or {},
+            default_tier=cfg.default_tier(),
+            prefer=prefer,
+        )
+    # 无云端配置或本地优先：保持原有 [local, cloud...] 顺序
+    return Router([local] + cloud, prefer="api" if prefer == "api" else "local")
 
 
 def _open_memory(cfg: AgentConfig, enabled: bool = True) -> Optional[Memory]:
@@ -407,7 +416,8 @@ def build_parser() -> argparse.ArgumentParser:
     common(fetch)
 
     kb = sub.add_parser("kb-build", help="构建课程知识库检索索引(RAG)")
-    kb.add_argument("--course-root", default="output/特训营全部课程")
+    kb.add_argument("--course-root", default="output",
+                    help="课程产物根目录（默认 output，子目录含 sections.json 即算一门课）")
     kb.add_argument("--out", default="data/kb_index.json")
     common(kb)
 
