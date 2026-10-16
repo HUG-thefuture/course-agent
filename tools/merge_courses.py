@@ -1,13 +1,16 @@
 """课程整合：相关课程聚合为课程组，每组生成一份整合复习文档。
 
-分组策略（两层）：
-1. 编号映射：课程标题自带编号（如"45、request获取静态数据"）按系列分段；
-2. 关键词兜底：无编号的课程（特训营/星星会议室）按笔记关键词归类。
+分组策略（默认：按内容相关性）：
+内容聚类——每门课的知识点逐块嵌入（bge-m3），课程间相似度用「双向 top-k
+块相似度均值」（抗整课平均掉的局部强信号），贪心平均连接聚类；组名取组内
+多数课程所属的编号系列名（编号映射/关键词作为命名种子）。
 
-每组产出：output/课程整合/<组名>/整合复习.md
+--by-title 退回纯标题编号分组（不跑嵌入，快，但无编号课全归"特训营"）。
+
+每组产出：output/课程整合/<组名>/整合复习.md + 组.json（成员清单，webui 读）
 （体系全景图 + 依赖关系 + 核心主线 + 易混淆对照 + 跨课程学习顺序）
 
-用法（后台运行）：python tools/merge_courses.py
+用法（后台运行）：python tools/merge_courses.py [--force]
 """
 
 from __future__ import annotations
@@ -78,47 +81,64 @@ def group_of(title: str) -> str:
     return DEFAULT_GROUP
 
 
-def _course_text(d: Path) -> str:
+def _course_blocks(d: Path, limit: int = 60) -> list[str]:
+    """每门课的块级文本：逐知识点（标题+概念摘要），最多 limit 块。"""
     try:
         secs = json.loads((d / "sections.json").read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return ""
-    parts = []
+        return []
+    out: list[str] = []
     for sec in secs:
         for kp in sec.get("knowledge_points", []):
-            parts.append(kp.get("title", "") + " " +
-                         (kp.get("concept") or kp.get("detail", ""))[:120])
-    return " ".join(parts)[:4000]
+            t = (kp.get("title", "") + " " +
+                 (kp.get("concept") or kp.get("detail", "")))[:400]
+            if t.strip():
+                out.append(t)
+            if len(out) >= limit:
+                return out
+    return out
 
 
-def content_clusters(courses: list[Path], embedder, threshold: float = 0.55
-                     ) -> list[list[Path]]:
-    """按课程内容向量贪心聚类（余弦相似度 >= threshold 并组）。
+def content_clusters(courses: list[Path], embedder, threshold: float = 0.68,
+                  top_k: int = 5) -> list[list[Path]]:
+    """按课程内容的块级相似度贪心聚类（平均连接）。
 
-    无文本内容的课程不参与聚类（嵌入字面量会彼此高度相似而错误抱团），单独成组。
+    度量：每门课逐知识点嵌入为块向量集合；两课相似度 = 双向 top-k 块相似度
+    均值（A 的每块取与 B 的最相似块、取最高的 k 个平均，B→A 同理再平均）。
+    块级度量避免整课单向量把局部强相关信号平均掉——实测同系列 p50 0.697、
+    跨系列 0.630，分离度明显好于整课质心（0.855/0.825）与块级均值（0.475/0.453）。
+
+    无知识块的课程不参与聚类（嵌入字面量会彼此高度相似而错误抱团），单独成组。
     """
-    import math
-    texts = {d: _course_text(d) for d in courses}
-    embd = {d: (embedder.embed([t])[0] if t.strip() else None)
-            for d, t in texts.items()}
+    import numpy as np
 
-    def cos(a, b):
-        dot = sum(x * y for x, y in zip(a, b))
-        na = math.sqrt(sum(x * x for x in a)) or 1.0
-        nb = math.sqrt(sum(x * x for x in b)) or 1.0
-        return dot / (na * nb)
+    blocks = {d: _course_blocks(d) for d in courses}
+    vecs: dict[Path, "np.ndarray"] = {}
+    todo = [d for d in courses if blocks[d]]
+    for d in todo:
+        e = np.asarray(embedder.embed(blocks[d]), dtype=np.float32)
+        e /= (np.linalg.norm(e, axis=1, keepdims=True) + 1e-9)
+        vecs[d] = e
+    print(f"  嵌入 {len(vecs)} 门课的知识块完成", flush=True)
+
+    def sim(a: Path, b: Path) -> float:
+        M = vecs[a] @ vecs[b].T          # (na, nb) 块对相似度矩阵
+        k = min(top_k, M.shape[0], M.shape[1])
+        top_a = np.sort(M.max(axis=1))[-k:].mean()
+        top_b = np.sort(M.max(axis=0))[-k:].mean()
+        return float((top_a + top_b) / 2)
 
     clusters: list[list[Path]] = []
     for d in courses:
-        if embd[d] is None:
+        if d not in vecs:                # 无知识块：单独成组
             clusters.append([d])
             continue
         best, best_s = None, threshold
         for cl in clusters:
-            members = [m for m in cl if embd[m] is not None]
+            members = [m for m in cl if m in vecs]
             if not members:
                 continue
-            s = sum(cos(embd[d], embd[m]) for m in members) / len(members)
+            s = sum(sim(d, m) for m in members) / len(members)
             if s > best_s:
                 best, best_s = cl, s
         if best is not None:
@@ -207,12 +227,16 @@ def gen_integration(llm, group_name: str, courses: list[Path]) -> str:
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="课程整合：相关课程聚合生成整合复习")
-    ap.add_argument("--output", default="output/特训营全部课程")
+    ap.add_argument("--output", default="output",
+                    help="课程产物根目录（默认 output，子目录含 sections.json 即算一门课）")
     ap.add_argument("--dest", default="output/课程整合")
     ap.add_argument("--only", default="", help="只处理指定组名（调试用）")
     ap.add_argument("--by-title", action="store_true",
-                    help="仅按标题分组（默认按内容向量聚类+标题命名）")
-    ap.add_argument("--threshold", type=float, default=0.55)
+                    help="仅按标题编号分组（不用内容聚类）")
+    ap.add_argument("--threshold", type=float, default=0.68,
+                    help="内容聚类的块级相似度阈值（默认 0.68）")
+    ap.add_argument("--force", action="store_true",
+                    help="覆盖已存在的整合复习.md（默认跳过）")
     args = ap.parse_args(argv)
 
     cfg = load_config()
@@ -246,9 +270,13 @@ def main(argv: list[str]) -> int:
         dest = Path(args.dest) / re.sub(r"[^\w（）()-]+", "-", name)
         dest.mkdir(parents=True, exist_ok=True)
         md = dest / "整合复习.md"
-        if md.is_file() and md.stat().st_size > 500:
+        if md.is_file() and md.stat().st_size > 500 and not args.force:
             print(f"[{name}] 已存在，跳过", flush=True)
             continue
+        # 组内课程清单随文档落盘，webui 据此展示成员
+        (dest / "组.json").write_text(json.dumps(
+            {"name": name, "courses": [d.name for d in courses]},
+            ensure_ascii=False, indent=1), encoding="utf-8")
         try:
             text = gen_integration(llm, name, courses)
             md.write_text(text, encoding="utf-8")

@@ -515,9 +515,70 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/run/status":
                 with _RUN_LOCK:
                     return self._json(dict(_RUN_STATE))
+            if u.path == "/api/groups":
+                return self._json({"groups": self._group_rows()})
+            if u.path == "/api/group":
+                return self._json(self._group_detail((q.get("name") or [""])[0]))
             return self._json({"error": "not found"}, 404)
         except Exception as e:  # 防单请求异常拖垮服务
             return self._json({"error": str(e)}, 500)
+
+    # ---------------------------------------------------- 课程组（内容整合）
+    def _group_dirs(self) -> list[Path]:
+        gdir = Path(self.cfg.output_dir) / "课程整合"
+        if not gdir.is_dir():
+            return []
+        return [d for d in sorted(gdir.iterdir()) if (d / "整合复习.md").is_file()]
+
+    def _group_name(self, d: Path) -> str:
+        gp = d / "组.json"
+        if gp.is_file():
+            try:
+                return json.loads(gp.read_text(encoding="utf-8")).get("name") or d.name
+            except (json.JSONDecodeError, OSError):
+                pass
+        return d.name
+
+    def _group_courses(self, d: Path) -> list[tuple[str, str]]:
+        """组内成员：返回 [(course_id, 展示标题)]，标题走改名覆盖表。"""
+        gp = d / "组.json"
+        ids: list[str] = []
+        if gp.is_file():
+            try:
+                ids = json.loads(gp.read_text(encoding="utf-8")).get("courses", [])
+            except (json.JSONDecodeError, OSError):
+                ids = []
+        overrides = _course_titles_override(self.cfg)
+        rows: list[tuple[str, str]] = []
+        for cid in ids:
+            cd = _find_course(self.cfg, cid)
+            if cd is None:
+                continue
+            try:
+                s = json.loads((cd / "session.json").read_text(encoding="utf-8"))
+                rows.append((cid, overrides.get(cid) or s.get("title", cid)))
+            except (json.JSONDecodeError, OSError):
+                rows.append((cid, cid))
+        return rows
+
+    def _group_rows(self) -> list[dict]:
+        out = []
+        for d in self._group_dirs():
+            courses = self._group_courses(d)
+            out.append({"name": self._group_name(d),
+                        "count": len(courses),
+                        "size": (d / "整合复习.md").stat().st_size})
+        out.sort(key=lambda r: -r["count"])
+        return out
+
+    def _group_detail(self, gname: str) -> dict:
+        for d in self._group_dirs():
+            if self._group_name(d) == gname or d.name == gname:
+                return {"name": self._group_name(d),
+                        "courses": [{"id": cid, "title": t}
+                                    for cid, t in self._group_courses(d)],
+                        "doc": (d / "整合复习.md").read_text(encoding="utf-8")}
+        return {"error": "课程组不存在"}
 
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
@@ -741,12 +802,17 @@ pre{white-space:pre-wrap;word-break:break-word;background:#111827;padding:14px;b
 </style></head><body>
 <header><h1>📚 CourseAgent 课程助手</h1><nav>
 <button id="nav-courses" class="on" onclick="show('courses')">我的课程</button>
+<button id="nav-groups" onclick="show('groups')">课程组</button>
 <button id="nav-run" onclick="show('run')">新任务</button>
 </nav></header>
 <main>
 <section id="view-courses"><div class="card" id="course-list"><span class="dim">加载中…</span></div></section>
 
 <section id="view-course" class="hide"><div id="course-body"></div></section>
+
+<section id="view-groups" class="hide"><div class="card" id="group-list"><span class="dim">加载中…</span></div></section>
+
+<section id="view-groupdetail" class="hide"><div id="group-body"></div></section>
 
 <section id="view-run" class="hide"><div class="card"><h3>➕ 新课程整理任务</h3>
 <div class="row"><div><label>素材（文件路径 / 回放链接 / 转写json）</label>
@@ -763,8 +829,25 @@ let COURSE=null,DATA=null;
 function h(s){return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;")}
 const BSQ=String.fromCharCode(92);
 function js(s){return (s||"").split(BSQ).join(BSQ+BSQ).split("'").join(BSQ+"'").split('"').join("&quot;")}
-function show(t){["courses","course","run"].forEach(x=>{$("#nav-"+(x==="course"?"courses":x))?.classList.toggle("on",x!=="run"&&t!=="run");$("#view-"+x).classList.toggle("hide",x!==t)});if(t==="courses")loadCourses()}
+function show(t){["courses","course","groups","groupdetail","run"].forEach(x=>{$("#nav-"+({course:"courses",groupdetail:"groups"}[x]||x))?.classList.toggle("on",(x==="courses"&&(t==="courses"||t==="course"))||(x==="groups"&&(t==="groups"||t==="groupdetail")));$("#view-"+x).classList.toggle("hide",x!==t)});if(t==="courses")loadCourses();if(t==="groups")loadGroups()}
 async function api(u,opt){const r=await fetch(u,opt);return r.json()}
+
+async function loadGroups(){
+  const d=await api("/api/groups");
+  if(!d.groups||!d.groups.length){$("#group-list").innerHTML='<h3 style="margin-top:0">课程组</h3><p class="dim">尚无整合产物。运行 <code>python tools/merge_courses.py --force</code> 按内容相关性聚合课程并生成整合复习文档。</p>';return}
+  $("#group-list").innerHTML=`<h3 style="margin-top:0">课程组（${d.groups.length}）</h3><p class="dim">按课程内容向量聚类聚合的相关课程，每组一份跨课程整合复习（体系全景图 / 学习主线 / 易混淆对照 / 学习顺序）。</p><table><tr><th>课程组</th><th>成员</th><th></th></tr>`+
+   d.groups.map(g=>`<tr><td>${h(g.name)}</td><td class="dim">${g.count} 门</td><td><button class="pri" onclick="openGroup('${js(g.name)}')">打开整合复习</button></td></tr>`).join("")+`</table>`;
+}
+async function openGroup(name){
+  const d=await api("/api/group?name="+encodeURIComponent(name));
+  if(d.error){$("#group-body").innerHTML=`<div class="card"><span class="bad">${h(d.error)}</span></div>`;show("groupdetail");return}
+  $("#group-body").innerHTML=`
+  <button class="mini" onclick="show('groups')">← 返回课程组</button>
+  <div class="card"><h2 style="margin:0 0 6px">${h(d.name)} · 整合复习</h2>
+  <span class="dim">成员课程 ${d.courses.length} 门：</span><div>${d.courses.map(c=>`<button class="mini" style="margin:3px 4px 0 0" onclick="openCourse('${js(c.id)}')">${h(c.title)}</button>`).join("")}</div></div>
+  <div class="card"><pre>${h(d.doc)}</pre></div>`;
+  show("groupdetail");window.scrollTo(0,0);
+}
 
 async function loadCourses(){
   const d=await api("/api/courses");
