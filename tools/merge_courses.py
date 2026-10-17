@@ -207,22 +207,69 @@ def group_context(courses: list[Path], per_course: int = 3) -> str:
     return "\n\n".join(parts)
 
 
-def gen_integration(llm, group_name: str, courses: list[Path]) -> str:
-    ctx = group_context(courses)
+# 分段生成：组内课程超过该数量就分批，每批单独生成再拼接。
+# 单次调用输出上限（max_tokens）有限，大组（45 门）一次性写完必被截断——
+# 实测 3 组曾断在自检清单中途，故按批次拆分。批大小同时受本地 16k 上下文约束。
+_CHUNK_COURSES = 8
+_CTX_CHARS = 12000
+
+_SECTIONS_FULL = (
+    "## 课程构成\n(列出组内课程及各自定位, 一句话)\n"
+    "## 知识体系全景图\n(文字树状图, 跨课程组织)\n"
+    "## 学习主线\n(3-6 步主线, 说明先后依赖)\n"
+    "## 核心知识点速览\n(按主题分组列出要点, 标注来自哪门课)\n"
+    "## 易混淆点对照表\n| 概念A | 概念B | 区别 | 记忆方法 |\n"
+    "## 跨课程学习顺序建议\n(编号路径, 标注可并行项)\n"
+    "## 综合自检清单\n(逐知识点检查项)\n"
+)
+
+_CHUNK_RULE = (
+    "纪律：只使用【课程素材】中出现的内容；补充标注「（补充，非课程内容）」。\n"
+    "**输出必须完整**：自检清单要写完最后一项，不要中途停止或省略。\n"
+    "{part}\n\n"
+)
+
+
+def _gen_once(llm, group_name: str, ctx: str, part: str = "",
+              max_tokens: int = 8192) -> str:
+    hint = (f"本次只覆盖素材中的部分课程，标题写「{group_name} · 整合复习"
+            f"（{part}）」。\n" if part else "")
     system = (
         "你是双擎学习助手的跨课程整合模块。以下是同一课程体系下的多门相关课程"
         "的知识点摘要。生成一份**整合复习文档**（Markdown），结构：\n"
         f"# {group_name} · 整合复习\n"
-        "## 课程构成\n(列出组内课程及各自定位, 一句话)\n"
-        "## 知识体系全景图\n(文字树状图, 跨课程组织)\n"
-        "## 学习主线\n(3-6 步主线, 说明先后依赖)\n"
-        "## 核心知识点速览\n(按主题分组列出要点, 标注来自哪门课)\n"
-        "## 易混淆点对照表\n| 概念A | 概念B | 区别 | 记忆方法 |\n"
-        "## 跨课程学习顺序建议\n(编号路径, 标注可并行项)\n"
-        "## 综合自检清单\n(逐知识点检查项)\n\n"
-        "纪律：只使用【课程素材】中出现的内容；补充标注「（补充，非课程内容）」。\n\n"
-        f"【课程素材】\n{truncate(ctx, 24000)}")
-    return llm.chat(system, "请生成整合复习文档。", max_tokens=4096)
+        + _SECTIONS_FULL
+        + _CHUNK_RULE.format(part=hint)
+        + f"【课程素材】\n{ctx}")
+    return llm.chat(system, "请生成整合复习文档。", max_tokens=max_tokens)
+
+
+def gen_integration(llm, group_name: str, courses: list[Path]) -> str:
+    """生成整合复习文档；大组分批生成后拼接，避免单次输出被截断。"""
+    if len(courses) <= _CHUNK_COURSES:
+        return _gen_once(llm, group_name, truncate(group_context(courses), _CTX_CHARS))
+    batches = [courses[i:i + _CHUNK_COURSES]
+               for i in range(0, len(courses), _CHUNK_COURSES)]
+    docs: list[str] = []
+    for i, batch in enumerate(batches, 1):
+        ctx = truncate(group_context(batch), _CTX_CHARS)
+        docs.append(_gen_once(llm, group_name, ctx,
+                              part=f"{i}/{len(batches)}", max_tokens=8192))
+        print(f"  分段 {i}/{len(batches)} 完成（{len(batch)} 门课）", flush=True)
+    # 拼接：首段保留大标题与「课程构成」，后续段各自成节
+    merged = [docs[0].rstrip()]
+    for d in docs[1:]:
+        body = d.strip()
+        if body.startswith("# "):                       # 去掉重复大标题
+            body = body.split("\n", 1)[1].lstrip() if "\n" in body else ""
+        merged.append("\n\n---\n\n" + body)
+    full = "\n".join(merged) + "\n"
+    # 分段提示只服务于生成过程，成品标题不带「（i/n）」
+    lines = full.split("\n", 1)
+    if lines[0].lstrip("# ").strip() != f"{group_name} · 整合复习":
+        lines[0] = f"# {group_name} · 整合复习"
+        full = "\n".join(lines)
+    return full
 
 
 def main(argv: list[str]) -> int:
@@ -242,7 +289,9 @@ def main(argv: list[str]) -> int:
     cfg = load_config()
     local_chain, cloud_chain = build_client_chains(cfg)
     from course_agent.llm import Router
-    llm = Router(cloud_chain + local_chain)
+    # 本地 GPU 优先：远程链故障窗（DNS/超时）会让每次调用白等数分钟，
+    # 连续失败 1 次即跳过该模型；云端只做本地失败兜底（同 supervisor 策略）
+    llm = Router(local_chain + cloud_chain, skip_threshold=1)
 
     all_courses = sorted(p for p in Path(args.output).iterdir()
                          if p.is_dir() and (p / "sections.json").is_file())
