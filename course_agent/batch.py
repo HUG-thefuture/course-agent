@@ -152,7 +152,21 @@ def _material_for_item(item: BatchItem, cfg: AgentConfig) -> Material:
     """把单个批量项解析为 Material（视频自动下载+转写，带缓存）。"""
     src = item.source
     if re.match(r"^https?://", src):
-        if classify_url(src) in ("tencent_share", "media"):
+        if classify_url(src) == "tencent_share":
+            # 腾讯回放：默认走 AI 逐字稿自动提取（快、免下载免转写）；
+            # 无逐字稿等失败时回落视频下载转写
+            try:
+                return load_tencent_material(src, password=item.password)
+            except IngestError as e:
+                _log.warning("逐字稿提取失败，回落视频路径：%s", truncate(str(e), 120))
+            local = resolve_media_url(src, password=item.password,
+                                      workdir=cfg.data_dir)
+            segments = _transcribe_cached(local, cfg)
+            if not segments:
+                raise IngestError(f"视频转写结果为空: {local}")
+            return Material(title=item.title or "回放课程", kind="video",
+                            source=src, segments=segments)
+        if classify_url(src) == "media":
             local = resolve_media_url(src, password=item.password,
                                       workdir=cfg.data_dir)
             segments = _transcribe_cached(local, cfg)

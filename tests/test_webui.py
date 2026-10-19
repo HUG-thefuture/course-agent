@@ -8,7 +8,62 @@ from pathlib import Path
 from urllib.request import urlopen
 
 from course_agent.webui import (Handler, grade_objective, grade_subjective,
-                                _norm_text)
+                                _norm_text, parse_run_lines)
+
+
+class TestParseRunLines(unittest.TestCase):
+    """批量输入识别：链接 [提取码] [标题] / 链接|提取码|标题 / 注释行。"""
+
+    URL = "https://meeting.tencent.com/crm/abcd1234"
+
+    def test_bare_link(self):
+        items = parse_run_lines(self.URL)
+        self.assertEqual(items, [{"source": self.URL, "password": "", "title": ""}])
+
+    def test_space_format_with_code_and_title(self):
+        items = parse_run_lines(self.URL + " QSZI 大模型概述")
+        self.assertEqual(items[0]["password"], "QSZI")
+        self.assertEqual(items[0]["title"], "大模型概述")
+
+    def test_space_format_code_then_title_chinese(self):
+        items = parse_run_lines(self.URL + " HCKB")
+        self.assertEqual(items[0]["password"], "HCKB")
+        self.assertEqual(items[0]["title"], "")
+
+    def test_pipe_format(self):
+        items = parse_run_lines(self.URL + "|RRFZ|课程B|extra")
+        self.assertEqual(items[0], {"source": self.URL, "password": "RRFZ", "title": "课程B"})
+
+    def test_pipe_two_parts_is_password(self):
+        """两段竖线：与 batch 清单同构，第二段是提取码（顺序 链接|码|标题）。"""
+        items = parse_run_lines(self.URL + "|课程C")
+        self.assertEqual(items[0], {"source": self.URL, "password": "课程C", "title": ""})
+
+    def test_comments_and_blanks_ignored(self):
+        text = f"# 注释行\n\n  \n{self.URL} YWNR\n"
+        items = parse_run_lines(text)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["password"], "YWNR")
+
+    def test_long_token_is_title_not_password(self):
+        """超过 8 位非提取码形态，整段当标题。"""
+        items = parse_run_lines(self.URL + " ABCDEFGHI 真标题")
+        self.assertEqual(items[0]["password"], "")
+        self.assertEqual(items[0]["title"], "ABCDEFGHI 真标题")
+
+    def test_multi_line_mixed(self):
+        text = (f"{self.URL} QSZI 课A\n"
+                f"https://meeting.tencent.com/crm/xyz|RRFZ|课B\n"
+                "# 注释\n"
+                "some/dir/lecture.mp4 本地录屏")
+        items = parse_run_lines(text)
+        self.assertEqual(len(items), 3)
+        self.assertEqual([i["title"] for i in items], ["课A", "课B", "本地录屏"])
+        self.assertEqual(items[2]["source"], "some/dir/lecture.mp4")
+
+    def test_non_url_line_kept_as_source(self):
+        items = parse_run_lines("普通网页无法识别的整行")
+        self.assertEqual(items[0]["source"], "普通网页无法识别的整行")
 
 
 class TestGradeObjective(unittest.TestCase):

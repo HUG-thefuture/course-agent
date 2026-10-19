@@ -150,51 +150,119 @@ def _find_course(cfg: AgentConfig, cid: str) -> Optional[Path]:
 
 
 # ------------------------------------------------------------------ 运行状态
-_RUN_STATE: dict[str, Any] = {"running": False, "log": "", "result": None}
+_RUN_STATE: dict[str, Any] = {"running": False, "log": "", "result": None,
+                              "batch": [], "done": 0, "total": 0}
 _RUN_LOCK = threading.Lock()
 _PROGRESS_LOCK = threading.Lock()  # 进度文件读改写互斥（多线程 HTTP + 交卷）
 
 
-def _run_pipeline_async(input_src: str, password: str, title: str, cfg: AgentConfig) -> None:
-    import logging
+def parse_run_lines(text: str) -> list[dict]:
+    """把多行输入解析为待处理项：每行 `链接 [提取码] [标题]` 或 `链接|提取码|标题`。
 
+    腾讯会议回放链接会自动提取逐字稿；一行一项，# 开头为注释行，空行忽略。
+    链接后紧跟的 3-8 位字母数字视作提取码，其剩余部分作标题。
+    """
+    items: list[dict] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "|" in line:  # 与 batch 清单同构
+            parts = [x.strip() for x in line.split("|")]
+            if len(parts) >= 3:
+                items.append({"source": parts[0], "password": parts[1], "title": parts[2]})
+            elif len(parts) == 2:
+                key = "password" if parts[0].startswith("http") else "title"
+                items.append({"source": parts[0], "password": parts[1] if key == "password" else "",
+                              "title": parts[1] if key == "title" else ""})
+            elif parts and parts[0]:
+                items.append({"source": parts[0], "password": "", "title": ""})
+            continue
+        m = re.search(r"https?://\S+|[^\s|]+\.(?:mp4|mkv|mov|avi|webm|mp3|m4a|srt|vtt|json|txt|md|pdf)\b",
+                      line, re.I)
+        if not m:  # 纯标题路径无法识别，整行当源（交给下游报错，保持隔离）
+            items.append({"source": line, "password": "", "title": ""})
+            continue
+        source = m.group(0)
+        rest = (line[:m.start()] + " " + line[m.end():]).strip()
+        password, title = "", rest
+        toks = rest.split(None, 1)
+        if toks and re.fullmatch(r"[A-Za-z0-9]{3,8}", toks[0]):
+            password, title = toks[0], (toks[1] if len(toks) > 1 else "")
+        items.append({"source": source, "password": password, "title": title})
+    return [i for i in items if i["source"]]
+
+
+def _run_one(input_src: str, password: str, title: str, cfg: AgentConfig,
+             mem=None) -> dict:
+    """处理单个课程素材：加载 -> 整理 -> 落盘，返回结果 dict。"""
     from .ingest.loader import load_source
-    from .memory import Memory
     from .outputs import write_all
     from .pipeline.orchestrator import Orchestrator
+
+    material = load_source(input_src, password=password, workdir=cfg.data_dir)
+    course_title = title or material.title
+    llm = _build_llm(cfg)
+    orch = Orchestrator(llm, cfg, memory=mem)
+    result = orch.run(material, title=course_title)
+    outdir = Path(cfg.output_dir) / "webui" / result.session_id
+    result.output_dir = str(outdir)
+    write_all(result, outdir)
+    return {"ok": result.passed, "title": course_title,
+            "score": result.qa.score if result.qa else 0, "dir": str(outdir)}
+
+
+def _run_batch_async(items: list[dict], cfg: AgentConfig) -> None:
+    """后台串行处理多个课程素材，逐项更新 _RUN_STATE（含 batch 明细与进度）。"""
+    import logging
+    from .memory import Memory
 
     log = logging.getLogger("webui.run")
 
     def run():
+        mem = None
         try:
-            with _RUN_LOCK:
-                _RUN_STATE["log"] = "加载素材…"
             mem = Memory(Path(cfg.data_dir) / "memory.db")
-            try:
-                llm = _build_llm(cfg)
-                material = load_source(input_src, password=password, workdir=cfg.data_dir)
-                course_title = title or material.title
+            with _RUN_LOCK:
+                _RUN_STATE["batch"] = [
+                    {"title": it.get("title") or it["source"][-40:], "status": "pending",
+                     "score": 0, "error": ""} for it in items]
+                _RUN_STATE["done"] = 0
+                _RUN_STATE["total"] = len(items)
+                _RUN_STATE["result"] = None
+            ok_n = 0
+            for idx, it in enumerate(items):
+                label = it.get("title") or it["source"][-40:]
                 with _RUN_LOCK:
-                    _RUN_STATE["log"] = f"整理中：{course_title}（本地大模型处理，约数分钟）"
-                orch = Orchestrator(llm, cfg, memory=mem)
-                result = orch.run(material, title=course_title)
-                outdir = Path(cfg.output_dir) / "webui" / result.session_id
-                result.output_dir = str(outdir)
-                write_all(result, outdir)
+                    _RUN_STATE["log"] = f"[{idx + 1}/{len(items)}] 处理中：{label}"
+                    _RUN_STATE["batch"][idx]["status"] = "running"
+                try:
+                    r = _run_one(it["source"], it.get("password", ""),
+                                 it.get("title", ""), cfg, mem=mem)
+                    with _RUN_LOCK:
+                        b = _RUN_STATE["batch"][idx]
+                        b.update(status="done" if r["ok"] else "qa_failed",
+                                 score=r["score"])
+                    ok_n += 1 if r["ok"] else 0
+                except Exception as e:  # 单项失败不拖垮整批
+                    log.error("运行失败 %s: %s", it["source"], e)
+                    with _RUN_LOCK:
+                        _RUN_STATE["batch"][idx]["status"] = "failed"
+                        _RUN_STATE["batch"][idx]["error"] = truncate(str(e), 200)
                 with _RUN_LOCK:
-                    _RUN_STATE["result"] = {
-                        "ok": result.passed, "title": course_title,
-                        "score": result.qa.score if result.qa else 0,
-                        "dir": str(outdir)}
-                    _RUN_STATE["log"] = "完成"
-            finally:
-                mem.close()
-        except Exception as e:  # 前端可见的错误
-            log.error("运行失败: %s", e)
+                    _RUN_STATE["done"] = idx + 1
+            with _RUN_LOCK:
+                _RUN_STATE["result"] = {"ok": True, "batch": True,
+                                        "total": len(items), "passed": ok_n}
+                _RUN_STATE["log"] = f"批量完成：{ok_n}/{len(items)} 门通过质检"
+        except Exception as e:  # 整批无法启动（如 memory 打不开）
+            log.error("批量运行异常: %s", e)
             with _RUN_LOCK:
                 _RUN_STATE["result"] = {"ok": False, "error": truncate(str(e), 300)}
                 _RUN_STATE["log"] = f"失败：{truncate(str(e), 160)}"
         finally:
+            if mem is not None:
+                mem.close()
             with _RUN_LOCK:
                 _RUN_STATE["running"] = False
 
@@ -667,13 +735,21 @@ class Handler(BaseHTTPRequestHandler):
                 src = (body.get("input") or "").strip()
                 if not src:
                     return self._json({"error": "input required"}, 400)
+                # 统一按行解析（单行也支持 `链接 提取码 标题`）；空字段用表单栏兜底
+                items = parse_run_lines(src)
+                pw, ti = body.get("password", ""), body.get("title", "")
+                if len(items) == 1:
+                    items[0]["password"] = items[0]["password"] or pw
+                    items[0]["title"] = items[0]["title"] or ti
+                if not items:
+                    return self._json({"error": "没有可识别的课程链接/路径"}, 400)
                 with _RUN_LOCK:  # 检查与置位同一临界区，防双击双启动
                     if _RUN_STATE["running"]:
                         return self._json({"error": "已有任务在运行，请稍候"}, 409)
-                    _RUN_STATE.update(running=True, log="加载素材…", result=None)
-                _run_pipeline_async(src, body.get("password", ""),
-                                    body.get("title", ""), self.cfg)
-                return self._json({"ok": True})
+                    _RUN_STATE.update(running=True, log="排队中…", result=None,
+                                      batch=[], done=0, total=len(items))
+                _run_batch_async(items, self.cfg)
+                return self._json({"ok": True, "count": len(items)})
             return self._json({"error": "not found"}, 404)
         except Exception as e:
             return self._json({"error": str(e)}, 500)
@@ -815,13 +891,14 @@ pre{white-space:pre-wrap;word-break:break-word;background:#111827;padding:14px;b
 <section id="view-groupdetail" class="hide"><div id="group-body"></div></section>
 
 <section id="view-run" class="hide"><div class="card"><h3>➕ 新课程整理任务</h3>
-<div class="row"><div><label>素材（文件路径 / 回放链接 / 转写json）</label>
-<input id="r-in" placeholder="例：D:/录屏/xx.mp4 或 https://meeting.tencent.com/crm/xxx"></div>
-<div><label>提取码（可选）</label><input id="r-pw" placeholder="无则留空"></div></div>
-<label>课程标题（可选）</label><input id="r-ti" placeholder="默认取文件名">
-<p class="dim">腾讯会议回放无法自动提取时，先用 F12 抓 minutes/detail 走 tools/convert_tencent_minutes.py 生成转写 json 再提交。</p>
+<label>素材（一行一个：腾讯回放链接 / 文件路径）。腾讯会议回放自动提取 AI 逐字稿</label>
+<textarea id="r-in" rows="5" placeholder="https://meeting.tencent.com/crm/xxxx&#10;https://meeting.tencent.com/crm/yyyy 提取码 课程标题&#10;D:/录屏/xx.mp4 课程标题"></textarea>
+<p class="dim">单行时提取码/标题可用下方独立栏；多行时每行格式为 <code>链接 [提取码] [标题]</code> 或 <code>链接|提取码|标题</code>（# 开头为注释）。支持批量：多个链接一行一个，自动逐个提取整理。</p>
+<div class="row"><div><label>提取码（单行时使用）</label><input id="r-pw" placeholder="无则留空"></div>
+<div><label>课程标题（单行时使用）</label><input id="r-ti" placeholder="默认自动命名"></div></div>
 <button class="pri" onclick="startRun()">开始整理</button>
-<div id="r-log" class="dim" style="margin-top:10px"></div></div></section>
+<div id="r-log" class="dim" style="margin-top:10px"></div>
+<div id="r-batch"></div></div></section>
 </main>
 <script>
 const $=s=>document.querySelector(s);const $$=s=>document.querySelectorAll(s);
@@ -970,14 +1047,26 @@ async function runTests(si,i,regen){
 }
 
 async function startRun(){
+  const inp=$("#r-in").value;
+  if(!inp.trim()){alert("请填写至少一个课程链接或文件路径");return;}
   const d=await api("/api/run",{method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({input:$("#r-in").value,password:$("#r-pw").value,title:$("#r-ti").value})});
-  if(d.error)alert(d.error);else $("#r-log").textContent="已提交，后台整理中（本地大模型，约数分钟）…";
+    body:JSON.stringify({input:inp,password:$("#r-pw").value,title:$("#r-ti").value})});
+  if(d.error){alert(d.error);return;}
+  $("#r-batch").innerHTML="";
+  $("#r-log").textContent="已提交 "+(d.count||1)+" 个任务，后台自动提取整理中（腾讯回放先提取逐字稿，本地大模型整理每门约数分钟）…";
 }
+const _BST={pending:"⏳",running:"⚙️",done:"✅",qa_failed:"△",failed:"❌"};
 setInterval(()=>{api("/api/run/status").then(s=>{
-  const el=$("#r-log");if(!el)return;
+  const el=$("#r-log"),bb=$("#r-batch");if(!el)return;
   if(s.log)el.textContent=s.log;
-  if(!s.running&&s.result){const r=s.result;el.innerHTML=r.ok?`<span class="ok">✅ 完成：${h(r.title)}（${r.score} 分）</span> <a href="#" onclick="loadCourses();show('courses');return false">刷新课程列表</a>`:`<span class="bad">❌ ${h(r.error||"失败")}</span>`}
+  if(bb&&s.batch&&s.batch.length){
+    bb.innerHTML='<div class="dim" style="margin:8px 0">进度 '+(s.done||0)+'/'+(s.total||s.batch.length)+'</div>'+
+      s.batch.map(b=>'<div class="row" style="padding:2px 0">'+(_BST[b.status]||"?")+" "+h(b.title)+
+      (b.status==="done"?"（"+b.score+" 分）":"")+(b.error?' <span class="bad">'+h(b.error)+"</span>":"")+"</div>").join("");
+  }
+  if(!s.running&&s.result){const r=s.result;
+    if(r.batch){el.innerHTML=(r.passed===r.total?'<span class="ok">✅ 批量完成：'+r.passed+"/"+r.total+" 门通过质检</span>":'<span class="bad">△ 批量结束：'+(r.passed||0)+"/"+r.total+" 门通过</span>")+' <a href="#" onclick="loadCourses();show(\'courses\');return false">刷新课程列表</a>';}
+    else el.innerHTML=r.ok?`<span class="ok">✅ 完成：${h(r.title)}（${r.score} 分）</span> <a href="#" onclick="loadCourses();show('courses');return false">刷新课程列表</a>`:`<span class="bad">❌ ${h(r.error||"失败")}</span>`;}
 }).catch(()=>{})},4000);
 document.addEventListener("keydown",(ev)=>{
   if(ev.key!=="Tab"||!ev.target||!ev.target.classList||!ev.target.classList.contains("code"))return;

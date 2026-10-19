@@ -241,8 +241,28 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     setup_logging(args.verbose)
     src = args.input
     if _re.match(r"^https?://", src):
-        if classify_url(src) not in ("tencent_share", "media"):
+        kind = classify_url(src)
+        if kind not in ("tencent_share", "media"):
             raise IngestError("fetch 仅支持 腾讯会议回放链接 / m3u8、mp4 媒体链接；普通网页请直接用 run")
+        title = args.title or ""
+        if kind == "tencent_share":
+            # 优先逐字稿自动提取（免下载免转写），失败回落视频下载转写
+            from .ingest.loader import IngestError as _IE, load_tencent_material
+            try:
+                mat = load_tencent_material(src, password=args.password or "")
+            except _IE as e:
+                print(f"  逐字稿提取失败，回落视频路径：{truncate(str(e), 100)}")
+            else:
+                title = title or mat.title
+                outdir = Path(args.outdir or (Path(cfg.data_dir) / "transcripts"))
+                outdir.mkdir(parents=True, exist_ok=True)
+                jp = outdir / f"{title}.json"
+                jp.write_text(json.dumps(
+                    [{"start": s.start, "text": s.text} for s in mat.segments],
+                    ensure_ascii=False, indent=1), encoding="utf-8")
+                print(f"  逐字稿自动提取完成：{len(mat.segments)} 段 -> {jp}")
+                _log.info("接下来可运行: python main.py run --input \"%s\" --title \"%s\"", jp, title)
+                return 0
         local = resolve_media_url(src, password=args.password or "",
                                   workdir=cfg.data_dir)
     else:

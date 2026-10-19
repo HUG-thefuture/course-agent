@@ -85,12 +85,30 @@ def fetch_url(url: str, password: str = "", timeout: int = 30) -> tuple[str, str
     return title or url, text
 
 
+def load_tencent_material(url: str, password: str = "") -> Material:
+    """腾讯会议回放：自动提取 AI 逐字稿 -> Material（免下载视频、免本地转写）。
+
+    提取失败（无逐字稿/提取码错误/网络问题）抛 IngestError，原因可读。
+    """
+    try:
+        rows, meta = tencent_mod.harvest_minutes(url, password)
+    except (ValueError, OSError) as e:
+        raise IngestError(tencent_mod.guided_steps(url, str(e))) from e
+    segments = [Segment(start=r["start"], text=r["text"]) for r in rows]
+    _log.info("自动提取逐字稿：%s（%s 段，约 %s 分钟）",
+              meta.get("source", "")[-12:], len(segments), meta.get("duration_min"))
+    return Material(title=f"回放课程 {tencent_mod._short_code(url)}"[:40],
+                    kind="transcript", source=url, segments=segments)
+
+
 def load_source(path_or_url: str, password: str = "",
                 workdir: str | Path = "data") -> Material:
     """统一入口：文件路径或 http(s) URL -> Material。"""
     if re.match(r"^https?://", path_or_url):
         kind = classify_url(path_or_url)
-        if kind in ("tencent_share", "media"):
+        if kind == "tencent_share":
+            return load_tencent_material(path_or_url, password)
+        if kind == "media":
             local = resolve_media_url(path_or_url, password=password, workdir=workdir)
             segments = transcribe_media(local)
             if not segments:

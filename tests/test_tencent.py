@@ -1,12 +1,13 @@
-"""腾讯会议适配：链接识别、提取码合并、页面扫描、引导话术。"""
+"""腾讯会议适配：链接识别、提取码合并、页面扫描、逐字稿提取、引导话术。"""
 
+import json
 import unittest
 
 import course_agent.ingest.loader as loader_mod
 from course_agent.ingest.loader import classify_url
 from course_agent.ingest.tencent import (add_access_code, guided_steps,
-                                         is_tencent_share,
-                                         try_extract_video_url)
+                                         harvest_minutes, is_tencent_share,
+                                         minutes_rows, try_extract_video_url)
 
 SHARE = ("https://meeting.tencent.com/v2/cloud-record/share.html"
          "?record_id=abc123&access_code=8888")
@@ -102,6 +103,106 @@ class TestExtract(unittest.TestCase):
         self.assertIn("mp4", text)
         self.assertIn("允许下载", text)
         self.assertIn(SHARE, text)
+
+
+class TestHarvestMinutes(unittest.TestCase):
+    """逐字稿自动提取链：_http_get 单点打桩（share_uuid/record_info/minutes 全走它）。"""
+
+    import course_agent.ingest.tencent as _t
+
+    def _stub(self, mapping):
+        """mapping: URL 子串 -> 响应文本；命中第一个即返回。"""
+        def fake(url, **kw):
+            for key, body in mapping.items():
+                if key in url:
+                    return body
+            raise AssertionError(f"未打桩的 URL: {url[:80]}")
+        self._orig = self._t._http_get
+        self._t._http_get = fake
+
+    def _tearDown(self):
+        self._t._http_get = self._orig
+
+    def _ok_bodies(self):
+        uuid = "9d1dac6c-8243-4122-9919-8d2dffae59f9"
+        minutes = json.dumps({"code": 0, "minutes": {"paragraphs": [
+            {"pid": 1, "start_time": 1500, "sentences": [
+                {"words": [{"text": "大家好"}, {"text": "，开始上课"}]}]},
+            {"pid": 2, "start_time": 62000, "sentences": [
+                {"words": [{"text": "今天讲 FastAPI"}]}]},
+            {"pid": 3, "start_time": 0, "sentences": [{"words": [{"text": "  "}]}]},
+        ]}})
+        return {
+            "/cw/": f"<html>shareId={uuid} end</html>",
+            "get-multi-record-info": json.dumps(
+                {"code": 0, "data": {"base_infos": [
+                    {"recording_id": "R123", "duration": "3600000"}]}}),
+            "minutes/detail": minutes,
+        }
+
+    def test_happy_path(self):
+        self._stub(self._ok_bodies())
+        try:
+            rows, meta = harvest_minutes(
+                "https://meeting.tencent.com/crm/abcd1234", password="QSZI")
+        finally:
+            self._tearDown()
+        self.assertEqual(len(rows), 2)              # 纯空白段被跳过
+        self.assertEqual(rows[0]["text"], "大家好，开始上课")
+        self.assertAlmostEqual(rows[0]["start"], 1.5)
+        self.assertEqual(meta["recording_id"], "R123")
+        self.assertEqual(meta["duration_min"], 60.0)
+
+    def test_split_version_fallback(self):
+        """split_version=1 空段落时应回退试 0（2026-08 底前旧记录）。"""
+        bodies = self._ok_bodies()
+        minutes_ok = bodies["minutes/detail"]
+
+        # sv=1 返回空、sv=0 返回正常
+        def fake2(url, **kw):
+            for key, body in bodies.items():
+                if key in url:
+                    if key == "minutes/detail":
+                        return (json.dumps({"code": 0, "minutes": {"paragraphs": []}})
+                                if "split_version=1" in url else minutes_ok)
+                    return body
+            raise AssertionError(url[:60])
+        orig = self._t._http_get
+        self._t._http_get = fake2
+        try:
+            rows, meta = harvest_minutes("https://meeting.tencent.com/crm/x1")
+        finally:
+            self._t._http_get = orig
+        self.assertEqual(len(rows), 2)
+
+    def test_bad_password_readable_error(self):
+        bodies = self._ok_bodies()
+        bodies["get-multi-record-info"] = json.dumps(
+            {"code": 0, "data": {"base_infos": []}})   # 密码错时接口返回空列表
+        self._stub(bodies)
+        try:
+            with self.assertRaises(ValueError) as cm:
+                harvest_minutes("https://meeting.tencent.com/crm/abcd", password="XXXX")
+        finally:
+            self._tearDown()
+        self.assertIn("提取码", str(cm.exception))
+
+    def test_no_minutes_readable_error(self):
+        bodies = self._ok_bodies()
+        bodies["minutes/detail"] = json.dumps({"code": 0, "minutes": {"paragraphs": []}})
+        self._stub(bodies)
+        try:
+            with self.assertRaises(ValueError) as cm:
+                harvest_minutes("https://meeting.tencent.com/crm/abcd")
+        finally:
+            self._tearDown()
+        self.assertIn("逐字稿", str(cm.exception))
+
+    def test_minutes_rows_pure(self):
+        rows = minutes_rows({"minutes": {"paragraphs": [
+            {"start_time": 0, "sentences": [{"words": [{"text": "hi"}]}]}]}})
+        self.assertEqual(rows, [{"start": 0.0, "text": "hi"}])
+        self.assertEqual(minutes_rows({}), [])
 
 
 if __name__ == "__main__":
