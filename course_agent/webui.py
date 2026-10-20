@@ -288,6 +288,9 @@ def _build_llm(cfg: AgentConfig):
 
 
 # ---------------------------------------------------------- 新课程自动归组
+_GROUP_LOCK = threading.Lock()  # 补归组与批量归组互斥（防同组 组.json 竞态写）
+
+
 def _autogroup_backfill(cfg: AgentConfig) -> None:
     """启动时补归组：已过质检但未进任何课程组的历史课程（如服务停机期间
     跑完的课）。只做规则/嵌入归组（不阻塞、不跑 LLM 整合，整合留待下次
@@ -297,10 +300,11 @@ def _autogroup_backfill(cfg: AgentConfig) -> None:
 
     log = logging.getLogger("webui.group")
     try:
-        missing = grouping.missing_passed_courses(cfg)
-        if missing:
-            log.info("启动补归组 %d 门课程", len(missing))
-            grouping.place_new_courses(missing, cfg, llm=None)
+        with _GROUP_LOCK:
+            missing = grouping.missing_passed_courses(cfg)
+            if missing:
+                log.info("启动补归组 %d 门课程", len(missing))
+                grouping.place_new_courses(missing, cfg, llm=None)
     except Exception as e:  # 补归组失败不影响服务启动
         log.error("启动补归组失败: %s", e)
 
@@ -321,7 +325,8 @@ def _autogroup_new(dirs: list[Path], cfg: AgentConfig) -> None:
         items.append((cid, d))
     if not items:
         return
-    info = grouping.place_new_courses(items, cfg, llm=None)  # 只嵌入新课程块，秒级
+    with _GROUP_LOCK:
+        info = grouping.place_new_courses(items, cfg, llm=None)  # 只嵌入新课程块，秒级
     if info["groups"]:
         threading.Thread(target=_regen_groups,
                          args=(info["groups"], cfg), daemon=True).start()
