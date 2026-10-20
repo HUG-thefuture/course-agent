@@ -180,6 +180,20 @@ class TestServerSmoke(unittest.TestCase):
         self.assertEqual(len(d["courses"]), 1)
         self.assertEqual(d["courses"][0]["title"], "测试课")
 
+    def test_failed_courses_hidden_by_default(self):
+        # 未过质检（生成失败）的课不出现在默认列表；?all=1 可见
+        bad = Path(self.cfg_out) / "webui" / "bad-002"
+        bad.mkdir(parents=True)
+        (bad / "session.json").write_text(json.dumps(
+            {"title": "失败课", "passed": False, "qa_score": 40,
+             "sections": 1, "exercises": 1}, ensure_ascii=False), encoding="utf-8")
+        (bad / "sections.json").write_text("[]", encoding="utf-8")
+        d = json.loads(urlopen(f"http://127.0.0.1:{self.port}/api/courses", timeout=5).read())
+        self.assertNotIn("失败课", [c["title"] for c in d["courses"]])
+        d2 = json.loads(urlopen(
+            f"http://127.0.0.1:{self.port}/api/courses?all=1", timeout=5).read())
+        self.assertIn("失败课", [c["title"] for c in d2["courses"]])
+
     def test_course_detail_and_grade(self):
         import urllib.request
         d = json.loads(urlopen(f"http://127.0.0.1:{self.port}/api/courses", timeout=5).read())

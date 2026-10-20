@@ -231,6 +231,7 @@ def _run_batch_async(items: list[dict], cfg: AgentConfig) -> None:
                 _RUN_STATE["total"] = len(items)
                 _RUN_STATE["result"] = None
             ok_n = 0
+            new_dirs: list[Path] = []
             for idx, it in enumerate(items):
                 label = it.get("title") or it["source"][-40:]
                 with _RUN_LOCK:
@@ -243,7 +244,9 @@ def _run_batch_async(items: list[dict], cfg: AgentConfig) -> None:
                         b = _RUN_STATE["batch"][idx]
                         b.update(status="done" if r["ok"] else "qa_failed",
                                  score=r["score"])
-                    ok_n += 1 if r["ok"] else 0
+                    if r["ok"]:
+                        ok_n += 1
+                        new_dirs.append(Path(r["dir"]))
                 except Exception as e:  # 单项失败不拖垮整批
                     log.error("运行失败 %s: %s", it["source"], e)
                     with _RUN_LOCK:
@@ -254,7 +257,15 @@ def _run_batch_async(items: list[dict], cfg: AgentConfig) -> None:
             with _RUN_LOCK:
                 _RUN_STATE["result"] = {"ok": True, "batch": True,
                                         "total": len(items), "passed": ok_n}
+            with _RUN_LOCK:
                 _RUN_STATE["log"] = f"批量完成：{ok_n}/{len(items)} 门通过质检"
+            # 新课程自动归入课程组（增量聚类+整合复习更新）；失败只记日志不拖垮批次
+            try:
+                _autogroup_new(new_dirs, cfg)
+            except Exception as e:  # 归组失败不影响课程产物
+                log.error("自动归组失败: %s", e)
+                with _RUN_LOCK:
+                    _RUN_STATE["log"] += f"；课程组更新失败：{truncate(str(e), 120)}"
         except Exception as e:  # 整批无法启动（如 memory 打不开）
             log.error("批量运行异常: %s", e)
             with _RUN_LOCK:
@@ -274,6 +285,75 @@ def _build_llm(cfg: AgentConfig):
     from .llm.factory import build_client_chains
     local_chain, cloud_chain = build_client_chains(cfg)
     return Router(local_chain + cloud_chain)
+
+
+# ---------------------------------------------------------- 新课程自动归组
+def _autogroup_backfill(cfg: AgentConfig) -> None:
+    """启动时补归组：已过质检但未进任何课程组的历史课程（如服务停机期间
+    跑完的课）。只做规则/嵌入归组（不阻塞、不跑 LLM 整合，整合留待下次
+    新课程触发或手动 merge_courses.py）。"""
+    import logging
+    from . import grouping
+
+    log = logging.getLogger("webui.group")
+    try:
+        missing = grouping.missing_passed_courses(cfg)
+        if missing:
+            log.info("启动补归组 %d 门课程", len(missing))
+            grouping.place_new_courses(missing, cfg, llm=None)
+    except Exception as e:  # 补归组失败不影响服务启动
+        log.error("启动补归组失败: %s", e)
+
+
+def _autogroup_new(dirs: list[Path], cfg: AgentConfig) -> None:
+    """质检通过的新课程自动归入课程组（增量内容聚类，嵌入服务不可用时
+    自动退化为标题规则）；受影响组的整合复习在后台线程用 LLM 刷新。"""
+    from . import grouping
+
+    out_root = Path(cfg.output_dir)
+    items: list[tuple[str, Path]] = []
+    for d in dirs:
+        d = Path(d)
+        try:
+            cid = d.relative_to(out_root).as_posix()
+        except ValueError:
+            cid = d.name
+        items.append((cid, d))
+    if not items:
+        return
+    info = grouping.place_new_courses(items, cfg, llm=None)  # 只嵌入新课程块，秒级
+    if info["groups"]:
+        threading.Thread(target=_regen_groups,
+                         args=(info["groups"], cfg), daemon=True).start()
+
+
+def _regen_groups(names: list[str], cfg: AgentConfig) -> None:
+    """后台重新生成受影响组的整合复习（LLM 重活）；失败保留既有/占位文档。"""
+    import logging
+    from . import grouping
+
+    log = logging.getLogger("webui.group")
+    try:
+        llm = Handler.llm or _build_llm(cfg)
+    except Exception as e:
+        log.error("整合复习刷新跳过（LLM 不可用）: %s", e)
+        return
+    out_root = Path(cfg.output_dir)
+    groups = grouping.load_groups(out_root)
+    courses = dict(grouping.passed_courses(out_root))
+    for name in names:
+        g = groups.get(name)
+        if not g:
+            continue
+        dirs = [courses[cid] for cid in g["ids"] if cid in courses]
+        if not dirs:
+            continue
+        try:
+            text = grouping.gen_integration(llm, name, dirs)
+            grouping.write_atomic(g["dir"] / "整合复习.md", text)
+            log.info("整合复习已刷新：%s（%d 门课）", name, len(dirs))
+        except Exception as e:
+            log.error("整合复习刷新失败 %s: %s", name, e)
 
 
 # ------------------------------------------------------------------ 在线测试
@@ -545,14 +625,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._html(INDEX_HTML)
             if u.path == "/api/courses":
                 overrides = _course_titles_override(self.cfg)
+                show_all = (q.get("all") or [""])[0] in ("1", "true", "yes")
                 rows = []
                 for d in _course_dirs(self.cfg):
                     try:
                         s = json.loads((d / "session.json").read_text(encoding="utf-8"))
+                        passed = bool(s.get("passed", False))
+                        if not passed and not show_all:
+                            continue  # 生成失败（未过质检）不入课程列表
                         cid = _course_id(self.cfg, d)
                         rows.append({"id": cid,
                                      "title": overrides.get(cid) or s.get("title", d.name),
-                                     "passed": s.get("passed", False),
+                                     "passed": passed,
                                      "score": s.get("qa_score", 0),
                                      "sections": s.get("sections", 0),
                                      "exercises": s.get("exercises", 0),
@@ -624,9 +708,11 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             try:
                 s = json.loads((cd / "session.json").read_text(encoding="utf-8"))
+                if not s.get("passed", False):
+                    continue  # 未过质检的课不进课程组
                 rows.append((cid, overrides.get(cid) or s.get("title", cid)))
             except (json.JSONDecodeError, OSError):
-                rows.append((cid, cid))
+                continue  # session 损坏的课无法确认状态，不展示
         return rows
 
     def _group_rows(self) -> list[dict]:
@@ -911,8 +997,8 @@ async function api(u,opt){const r=await fetch(u,opt);return r.json()}
 
 async function loadGroups(){
   const d=await api("/api/groups");
-  if(!d.groups||!d.groups.length){$("#group-list").innerHTML='<h3 style="margin-top:0">课程组</h3><p class="dim">尚无整合产物。运行 <code>python tools/merge_courses.py --force</code> 按内容相关性聚合课程并生成整合复习文档。</p>';return}
-  $("#group-list").innerHTML=`<h3 style="margin-top:0">课程组（${d.groups.length}）</h3><p class="dim">按课程内容向量聚类聚合的相关课程，每组一份跨课程整合复习（体系全景图 / 学习主线 / 易混淆对照 / 学习顺序）。</p><table><tr><th>课程组</th><th>成员</th><th></th></tr>`+
+  if(!d.groups||!d.groups.length){$("#group-list").innerHTML='<h3 style="margin-top:0">课程组</h3><p class="dim">尚无课程组。新课程整理完成后会自动按内容归组；也可运行 <code>python tools/merge_courses.py --force</code> 全量重建。</p>';return}
+  $("#group-list").innerHTML=`<h3 style="margin-top:0">课程组（${d.groups.length}）</h3><p class="dim">按课程内容聚类聚合的相关课程（新课程整理完成后自动归组并更新），每组一份跨课程整合复习（体系全景图 / 学习主线 / 易混淆对照 / 学习顺序）。</p><table><tr><th>课程组</th><th>成员</th><th></th></tr>`+
    d.groups.map(g=>`<tr><td>${h(g.name)}</td><td class="dim">${g.count} 门</td><td><button class="pri" onclick="openGroup('${js(g.name)}')">打开整合复习</button></td></tr>`).join("")+`</table>`;
 }
 async function openGroup(name){
@@ -1122,6 +1208,8 @@ def main(argv: list[str] | None = None) -> int:
 
     url = f"http://127.0.0.1:{used_port}"
     print(f"CourseAgent 图形界面已启动: {url} （Ctrl+C 停止）")
+    # 启动补归组：已过质检但未进任何课程组的历史课程，后台自动归组
+    threading.Thread(target=_autogroup_backfill, args=(cfg,), daemon=True).start()
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
