@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from urllib.request import urlopen
 
-from course_agent.webui import (Handler, grade_objective, grade_subjective,
+from course_agent.webui import (Handler, INDEX_HTML, grade_objective, grade_subjective,
                                 _norm_text, parse_run_lines)
 
 
@@ -205,6 +205,34 @@ class TestServerSmoke(unittest.TestCase):
         p = json.loads(urlopen(
             f"http://127.0.0.1:{self.port}/api/progress?course={cid}", timeout=5).read())
         self.assertEqual(p["sections"]["0"]["0"]["user"], "对")
+
+
+class TestPageScript(unittest.TestCase):
+    """内嵌前端脚本语法校验：曾因 onclick 里未转义的引号嵌套
+    （show('courses') 放进单引号字符串）导致整段 <script> 报
+    SyntaxError，页面所有功能一起失效。"""
+
+    def test_inline_js_parses(self):
+        import re
+        import shutil
+        import subprocess
+
+        m = re.search(r"<script>(.*)</script>", INDEX_HTML, re.S)
+        self.assertIsNotNone(m, "页面缺少 <script> 块")
+        js = m.group(1)
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("无 node，跳过 JS 语法校验")
+        with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8",
+                                         delete=False) as f:
+            f.write(js)
+            path = f.name
+        try:
+            r = subprocess.run([node, "--check", path],
+                               capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, f"内嵌 JS 语法错误:\n{r.stderr}")
+        finally:
+            Path(path).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

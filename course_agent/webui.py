@@ -1065,7 +1065,7 @@ setInterval(()=>{api("/api/run/status").then(s=>{
       (b.status==="done"?"（"+b.score+" 分）":"")+(b.error?' <span class="bad">'+h(b.error)+"</span>":"")+"</div>").join("");
   }
   if(!s.running&&s.result){const r=s.result;
-    if(r.batch){el.innerHTML=(r.passed===r.total?'<span class="ok">✅ 批量完成：'+r.passed+"/"+r.total+" 门通过质检</span>":'<span class="bad">△ 批量结束：'+(r.passed||0)+"/"+r.total+" 门通过</span>")+' <a href="#" onclick="loadCourses();show(\'courses\');return false">刷新课程列表</a>';}
+    if(r.batch){el.innerHTML=(r.passed===r.total?`<span class="ok">✅ 批量完成：${r.passed}/${r.total} 门通过质检</span>`:`<span class="bad">△ 批量结束：${r.passed||0}/${r.total} 门通过</span>`)+' <a href="#" onclick="loadCourses();show(&quot;courses&quot;);return false">刷新课程列表</a>';}
     else el.innerHTML=r.ok?`<span class="ok">✅ 完成：${h(r.title)}（${r.score} 分）</span> <a href="#" onclick="loadCourses();show('courses');return false">刷新课程列表</a>`:`<span class="bad">❌ ${h(r.error||"失败")}</span>`;}
 }).catch(()=>{})},4000);
 document.addEventListener("keydown",(ev)=>{
