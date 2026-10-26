@@ -157,39 +157,90 @@ _PROGRESS_LOCK = threading.Lock()  # 进度文件读改写互斥（多线程 HTT
 
 
 def parse_run_lines(text: str) -> list[dict]:
-    """把多行输入解析为待处理项：每行 `链接 [提取码] [标题]` 或 `链接|提取码|标题`。
+    """把多行输入解析为待处理项，支持两种格式混排：
 
-    腾讯会议回放链接会自动提取逐字稿；一行一项，# 开头为注释行，空行忽略。
+    1) 单行：`链接 [提取码] [标题]` 或 `链接|提取码|标题`（与 batch 清单同构）。
+    2) 标签块（会议纪要式粘贴，空行/新"录制"行分隔，字段顺序无关）::
+
+           录制: 27、langchain-向量存储Milvus概述
+           日期: 2026-10-26 16:31:23
+           录制文件：https://meeting.tencent.com/crm/24rZ6ekgbe
+           密码：YFDT
+
+       标签可用中英文冒号；"录制/课程/标题"取标题，"录制文件/文件/链接"取源，
+       "密码/提取码"取码；日期行忽略。"N、"开头的录制行表示新一条课程。
+
+    腾讯会议回放链接会自动提取逐字稿；# 开头为注释行，空行忽略。
     链接后紧跟的 3-8 位字母数字视作提取码，其剩余部分作标题。
     """
+    _LABEL = re.compile(r"^(录制文件|录播文件|文件|链接|密码|提取码|录制|录播|课程|标题|日期|时间)"
+                        r"\s*[：:]\s*(.*)$")
+    _TITLE_KEYS = {"录制", "录播", "课程", "标题"}
+    _SRC_KEYS = {"录制文件", "录播文件", "文件", "链接"}
+    _PW_KEYS = {"密码", "提取码"}
+    _IGNORE_KEYS = {"日期", "时间"}
+
     items: list[dict] = []
-    for raw in (text or "").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "|" in line:  # 与 batch 清单同构
+    block: dict | None = None       # 当前标签块 {source, password, title}
+
+    def flush() -> None:
+        nonlocal block
+        if block is not None and (block["source"] or block["title"]):
+            items.append(block)
+        block = None
+
+    def parse_plain(line: str) -> dict:
+        """原有单行解析：链接|码|标题 或 链接 [码] [标题]。"""
+        if "|" in line:
             parts = [x.strip() for x in line.split("|")]
             if len(parts) >= 3:
-                items.append({"source": parts[0], "password": parts[1], "title": parts[2]})
-            elif len(parts) == 2:
-                key = "password" if parts[0].startswith("http") else "title"
-                items.append({"source": parts[0], "password": parts[1] if key == "password" else "",
-                              "title": parts[1] if key == "title" else ""})
-            elif parts and parts[0]:
-                items.append({"source": parts[0], "password": "", "title": ""})
-            continue
+                return {"source": parts[0], "password": parts[1], "title": parts[2]}
+            if len(parts) == 2:
+                pkey = "password" if parts[0].startswith("http") else "title"
+                return {"source": parts[0],
+                        "password": parts[1] if pkey == "password" else "",
+                        "title": parts[1] if pkey == "title" else ""}
+            return {"source": parts[0], "password": "", "title": ""}
         m = re.search(r"https?://\S+|[^\s|]+\.(?:mp4|mkv|mov|avi|webm|mp3|m4a|srt|vtt|json|txt|md|pdf)\b",
                       line, re.I)
-        if not m:  # 纯标题路径无法识别，整行当源（交给下游报错，保持隔离）
-            items.append({"source": line, "password": "", "title": ""})
-            continue
+        if not m:  # 无法识别，整行当源（交给下游报错，保持隔离）
+            return {"source": line, "password": "", "title": ""}
         source = m.group(0)
         rest = (line[:m.start()] + " " + line[m.end():]).strip()
         password, title = "", rest
         toks = rest.split(None, 1)
         if toks and re.fullmatch(r"[A-Za-z0-9]{3,8}", toks[0]):
             password, title = toks[0], (toks[1] if len(toks) > 1 else "")
-        items.append({"source": source, "password": password, "title": title})
+        return {"source": source, "password": password, "title": title}
+
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            flush()                               # 空行/注释结束一个块
+            continue
+        lm = _LABEL.match(line)
+        if lm is None:                            # 裸行 → 结束块，走单行解析
+            flush()
+            items.append(parse_plain(line))
+            continue
+        key, val = lm.group(1), lm.group(2).strip()
+        if key in _TITLE_KEYS and re.match(r"^\d{1,3}[、.．-]", val):
+            flush()                               # "27、xxx" = 新一条课程
+        if block is None:
+            block = {"source": "", "password": "", "title": ""}
+        if key in _IGNORE_KEYS:
+            continue
+        if key in _SRC_KEYS and val:
+            block["source"] = block["source"] or val
+        elif key in _PW_KEYS and val:
+            block["password"] = block["password"] or val
+        elif key in _TITLE_KEYS and val:
+            block["title"] = block["title"] or val
+    flush()
+    # 块内只有标题没有源（纯标题块）→ 与旧行为一致：整串当 source 交下游报错
+    for it in items:
+        if not it["source"]:
+            it["source"] = it["title"]
     return [i for i in items if i["source"]]
 
 
@@ -982,9 +1033,9 @@ pre{white-space:pre-wrap;word-break:break-word;background:#111827;padding:14px;b
 <section id="view-groupdetail" class="hide"><div id="group-body"></div></section>
 
 <section id="view-run" class="hide"><div class="card"><h3>➕ 新课程整理任务</h3>
-<label>素材（一行一个：腾讯回放链接 / 文件路径）。腾讯会议回放自动提取 AI 逐字稿</label>
-<textarea id="r-in" rows="5" placeholder="https://meeting.tencent.com/crm/xxxx&#10;https://meeting.tencent.com/crm/yyyy 提取码 课程标题&#10;D:/录屏/xx.mp4 课程标题"></textarea>
-<p class="dim">单行时提取码/标题可用下方独立栏；多行时每行格式为 <code>链接 [提取码] [标题]</code> 或 <code>链接|提取码|标题</code>（# 开头为注释）。支持批量：多个链接一行一个，自动逐个提取整理。</p>
+<label>素材（一行一个链接，或直接粘贴会议纪要块）。腾讯会议回放自动提取 AI 逐字稿</label>
+<textarea id="r-in" rows="6" placeholder="https://meeting.tencent.com/crm/xxxx&#10;https://meeting.tencent.com/crm/yyyy 提取码 课程标题&#10;录制: 27、langchain-向量存储Milvus概述&#10;日期: 2026-10-26 16:31:23&#10;录制文件：https://meeting.tencent.com/crm/zzzz&#10;密码：ABCD"></textarea>
+<p class="dim">两种格式可混排：① 单行 <code>链接 [提取码] [标题]</code> 或 <code>链接|提取码|标题</code>（# 开头为注释）；② 会议纪要块（<code>录制:</code> 标题、<code>录制文件：</code>链接、<code>密码：</code>提取码，日期行自动忽略），整段粘贴即可，多个课程空行分隔或换用新"录制:"行。支持批量：自动逐个提取整理。</p>
 <div class="row"><div><label>提取码（单行时使用）</label><input id="r-pw" placeholder="无则留空"></div>
 <div><label>课程标题（单行时使用）</label><input id="r-ti" placeholder="默认自动命名"></div></div>
 <button class="pri" onclick="startRun()">开始整理</button>

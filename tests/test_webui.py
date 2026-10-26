@@ -65,6 +65,60 @@ class TestParseRunLines(unittest.TestCase):
         items = parse_run_lines("普通网页无法识别的整行")
         self.assertEqual(items[0]["source"], "普通网页无法识别的整行")
 
+    # ---- 会议纪要式标签块 ----
+
+    MEETING = ("录制: 27、langchain-向量存储Milvus概述\n"
+               "日期: 2026-10-26 16:31:23\n"
+               "录制文件：https://meeting.tencent.com/crm/24rZ6ekgbe\n"
+               "密码：YFDT")
+
+    def test_label_block_basic(self):
+        """用户粘贴的会议纪要块：标题/日期/录制文件/密码。"""
+        items = parse_run_lines(self.MEETING)
+        self.assertEqual(items, [{
+            "source": "https://meeting.tencent.com/crm/24rZ6ekgbe",
+            "password": "YFDT", "title": "27、langchain-向量存储Milvus概述"}])
+
+    def test_label_block_field_order_irrelevant(self):
+        """块内字段顺序无关，缺标题也可（源必填）。"""
+        text = (f"密码：QSZI\n录制文件: {self.URL}\n日期：2026-01-01 08:00:00")
+        items = parse_run_lines(text)
+        self.assertEqual(items, [{"source": self.URL, "password": "QSZI", "title": ""}])
+
+    def test_label_blocks_separated_by_blank_or_numbered(self):
+        """多个块：空行分隔，或下一条的编号"录制:"行直接分隔（无空行）。"""
+        text = (self.MEETING + "\n"
+                + "录制: 28、百炼平台\n录制文件：https://meeting.tencent.com/crm/bbbb\n"
+                  "密码：ABCD\n")
+        items = parse_run_lines(text)
+        self.assertEqual(len(items), 2)
+        self.assertEqual([i["title"] for i in items],
+                         ["27、langchain-向量存储Milvus概述", "28、百炼平台"])
+        self.assertEqual(items[1]["password"], "ABCD")
+
+    def test_label_block_mixed_with_plain_lines(self):
+        """标签块与旧单行/竖线格式混排：裸行独立成项，不被块吞掉。"""
+        text = (f"{self.URL} QSZI 单行课\n"
+                + self.MEETING + "\n\n"
+                + f"https://meeting.tencent.com/crm/p1|RRFZ|竖线课")
+        items = parse_run_lines(text)
+        self.assertEqual(len(items), 3)
+        self.assertEqual(items[0], {"source": self.URL, "password": "QSZI", "title": "单行课"})
+        self.assertEqual(items[1]["password"], "YFDT")
+        self.assertEqual(items[2], {"source": "https://meeting.tencent.com/crm/p1",
+                                    "password": "RRFZ", "title": "竖线课"})
+
+    def test_label_block_title_only_becomes_source(self):
+        """只有标题没有源的块：与旧行为一致，整串当 source 交下游报错。"""
+        items = parse_run_lines("录制: 只有标题的一行")
+        self.assertEqual(items[0]["source"], "只有标题的一行")
+
+    def test_label_block_ignores_date_time(self):
+        """时间/日期标签值不参与任何字段。"""
+        text = (f"时间: 2026-10-26 16:31:23\n标题: 某课\n文件: {self.URL}\n提取码：AB")
+        items = parse_run_lines(text)
+        self.assertEqual(items[0], {"source": self.URL, "password": "AB", "title": "某课"})
+
 
 class TestGradeObjective(unittest.TestCase):
     def test_single_choice(self):
