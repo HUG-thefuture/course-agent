@@ -119,6 +119,60 @@ class TestParseRunLines(unittest.TestCase):
         items = parse_run_lines(text)
         self.assertEqual(items[0], {"source": self.URL, "password": "AB", "title": "某课"})
 
+    def test_bare_title_then_label_block(self):
+        """腾讯会议导出的实际形态：裸标题行 + 日期/录制文件/密码 标签行。
+
+        标题行必须与下面的块配对成一条，而不是自己变成一条无链接待办
+        （曾导致用户粘贴 4 门课却只排了 4 条无效任务）。
+        """
+        text = ("32、langchain-agent及FunctionCalling\n"
+                "日期: 2026-10-26 16:31:23\n"
+                f"录制文件：{self.URL}\n"
+                "密码：ABCD\n"
+                "\n"
+                "33、langchain-MCP调用\n"
+                f"录制文件：https://meeting.tencent.com/crm/bbbb\n"
+                "密码：EFGH\n")
+        items = parse_run_lines(text)
+        self.assertEqual(items, [
+            {"source": self.URL, "password": "ABCD",
+             "title": "32、langchain-agent及FunctionCalling"},
+            {"source": "https://meeting.tencent.com/crm/bbbb", "password": "EFGH",
+             "title": "33、langchain-MCP调用"},
+        ])
+
+    def test_bare_title_without_link_still_reported(self):
+        """裸标题后面没有链接：仍作为 source 交给下游报错（不静默丢弃）。"""
+        items = parse_run_lines("32、langchain-agent及FunctionCalling\n日期: 2026-10-26")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["source"], "32、langchain-agent及FunctionCalling")
+
+    def test_label_free_three_line_blocks(self):
+        """无标签三行式：标题 / 链接 / 提取码 各一行。
+
+        用户直接从腾讯会议复制时常见这种形态（没有"录制文件：""密码："前缀）。
+        解析器必须把三行合成一条，且标题不能自己变成一条无链接待办。
+        """
+        text = ("32、langchain-agent及FunctionCalling\n"
+                f"{self.URL}\n"
+                "ABCD\n"
+                "\n"
+                "33、langchain-MCP调用\n"
+                "https://meeting.tencent.com/crm/bbbb\n"
+                "EFGH\n")
+        items = parse_run_lines(text)
+        self.assertEqual(items, [
+            {"source": self.URL, "password": "ABCD",
+             "title": "32、langchain-agent及FunctionCalling"},
+            {"source": "https://meeting.tencent.com/crm/bbbb", "password": "EFGH",
+             "title": "33、langchain-MCP调用"},
+        ])
+
+    def test_bare_password_line_attaches_to_previous_link(self):
+        """链接下面单独一行提取码：认领给上一条链接，不单独成项。"""
+        items = parse_run_lines(f"{self.URL}\nQSZI\n")
+        self.assertEqual(items, [{"source": self.URL, "password": "QSZI", "title": ""}])
+
 
 class TestGradeObjective(unittest.TestCase):
     def test_single_choice(self):

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sys
@@ -24,10 +25,24 @@ from typing import Any, Optional
 
 from .config import AgentConfig, load_config
 from .llm import LLMError
+from .buildinfo import build_id
 from .utils import setup_logging, slugify, truncate
 
 _PORT = 8686
 _ROOT = Path(__file__).resolve().parent.parent
+_BUILD = build_id()          # 本进程加载的代码版本（启动即固化）
+
+
+def url_file(data_dir: str | Path) -> Path:
+    """记录「实际监听地址」的文件：端口顺延后启动器据此打开正确 URL。"""
+    return Path(data_dir) / "webui_url.txt"
+
+
+def read_url(data_dir: str | Path) -> str:
+    try:
+        return url_file(data_dir).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 # ------------------------------------------------------------------ 判分器
@@ -182,12 +197,21 @@ def parse_run_lines(text: str) -> list[dict]:
 
     items: list[dict] = []
     block: dict | None = None       # 当前标签块 {source, password, title}
+    pending_title = ""              # 裸标题行（如 "32、langchain-xxx"），等下面的链接来配对
+    last_url_item: dict | None = None   # 最近一条「只有链接」的条目，供下一行的裸提取码认领
 
     def flush() -> None:
         nonlocal block
         if block is not None and (block["source"] or block["title"]):
             items.append(block)
         block = None
+
+    def flush_title() -> None:
+        """裸标题始终没等到链接：与旧行为一致，把标题当 source 交下游报错。"""
+        nonlocal pending_title
+        if pending_title:
+            items.append({"source": pending_title, "password": "", "title": ""})
+            pending_title = ""
 
     def parse_plain(line: str) -> dict:
         """原有单行解析：链接|码|标题 或 链接 [码] [标题]。"""
@@ -219,15 +243,40 @@ def parse_run_lines(text: str) -> list[dict]:
             flush()                               # 空行/注释结束一个块
             continue
         lm = _LABEL.match(line)
-        if lm is None:                            # 裸行 → 结束块，走单行解析
+        if lm is None:                            # 裸行
             flush()
-            items.append(parse_plain(line))
+            # 纯提取码行（如链接下面单独一行 "ABCD"）：认领给上一条链接。
+            # 用户常把「标题 / 链接 / 提取码」各写一行，也要能认出来。
+            if (last_url_item is not None and not last_url_item.get("password")
+                    and re.fullmatch(r"[A-Za-z0-9]{3,8}", line)):
+                last_url_item["password"] = line
+                last_url_item = None
+                continue
+            # 是"课程标题"而不是链接/文件（腾讯会议导出里常见：
+            #   "32、langchain-agent及FunctionCalling" 换行后再跟"录制文件:/密码:"）
+            # 这种标题要和下面的块配对，不能自己变成一条待办。
+            if not re.search(r"https?://|[/\\]", line):
+                flush_title()
+                pending_title = line
+                continue
+            item = parse_plain(line)
+            if pending_title and not item.get("title"):
+                item["title"] = pending_title       # 上一行的裸标题配给这条链接
+                pending_title = ""
+            else:
+                flush_title()
+            items.append(item)
+            last_url_item = item if re.match(r"^https?://", item["source"]) else None
             continue
         key, val = lm.group(1), lm.group(2).strip()
         if key in _TITLE_KEYS and re.match(r"^\d{1,3}[、.．-]", val):
             flush()                               # "27、xxx" = 新一条课程
         if block is None:
             block = {"source": "", "password": "", "title": ""}
+            if pending_title:                     # 裸标题 + 本块 → 合成一个完整条目
+                block["title"] = pending_title
+                pending_title = ""
+        last_url_item = None
         if key in _IGNORE_KEYS:
             continue
         if key in _SRC_KEYS and val:
@@ -237,6 +286,7 @@ def parse_run_lines(text: str) -> list[dict]:
         elif key in _TITLE_KEYS and val:
             block["title"] = block["title"] or val
     flush()
+    flush_title()
     # 块内只有标题没有源（纯标题块）→ 与旧行为一致：整串当 source 交下游报错
     for it in items:
         if not it["source"]:
@@ -263,6 +313,19 @@ def _run_one(input_src: str, password: str, title: str, cfg: AgentConfig,
             "score": result.qa.score if result.qa else 0, "dir": str(outdir)}
 
 
+def _display_title(it: dict) -> str:
+    """待办项展示名：优先用户给的标题，其次链接里的课程名，最后用短码。"""
+    title = (it.get("title") or "").strip()
+    if title:
+        return title
+    src = it.get("source") or ""
+    if src.startswith("http"):
+        from .ingest.tencent import _short_code
+        from .ingest.loader import _title_from_share_url
+        return _title_from_share_url(src) or _short_code(src) or src[-40:]
+    return src[-40:]
+
+
 def _run_batch_async(items: list[dict], cfg: AgentConfig) -> None:
     """后台串行处理多个课程素材，逐项更新 _RUN_STATE（含 batch 明细与进度）。"""
     import logging
@@ -276,7 +339,7 @@ def _run_batch_async(items: list[dict], cfg: AgentConfig) -> None:
             mem = Memory(Path(cfg.data_dir) / "memory.db")
             with _RUN_LOCK:
                 _RUN_STATE["batch"] = [
-                    {"title": it.get("title") or it["source"][-40:], "status": "pending",
+                    {"title": _display_title(it), "status": "pending",
                      "score": 0, "error": ""} for it in items]
                 _RUN_STATE["done"] = 0
                 _RUN_STATE["total"] = len(items)
@@ -284,7 +347,7 @@ def _run_batch_async(items: list[dict], cfg: AgentConfig) -> None:
             ok_n = 0
             new_dirs: list[Path] = []
             for idx, it in enumerate(items):
-                label = it.get("title") or it["source"][-40:]
+                label = _display_title(it)
                 with _RUN_LOCK:
                     _RUN_STATE["log"] = f"[{idx + 1}/{len(items)}] 处理中：{label}"
                     _RUN_STATE["batch"][idx]["status"] = "running"
@@ -635,6 +698,21 @@ def _save_progress(cfg: AgentConfig, cid: str, data: dict) -> None:
 
 
 # ------------------------------------------------------------------ HTTP
+class LocalHTTPServer(ThreadingHTTPServer):
+    """只监听本机、且端口冲突必须真报错的 HTTP 服务。
+
+    坑（Windows 专属，曾导致"改了代码却没生效"）：
+    `socketserver.TCPServer.allow_reuse_address = 1` 会设置 SO_REUSEADDR；在 Linux
+    上它只影响 TIME_WAIT，但 Windows 上它允许**两个进程绑同一个端口**——第二个进程
+    bind 成功却收不到连接，流量仍然进第一个（旧）进程。于是 webui 的"端口被占就顺延
+    到 8688"逻辑在 Windows 上完全失效：旧实例一直服务，用户以为改动没生效。
+    这里显式关掉，端口被占时 bind 会抛 WinError 10048，顺延逻辑才真正起作用。
+    """
+
+    allow_reuse_address = False
+    daemon_threads = True
+
+
 class Handler(BaseHTTPRequestHandler):
     cfg: AgentConfig = None  # type: ignore[assignment]
     llm = None
@@ -723,6 +801,10 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/run/status":
                 with _RUN_LOCK:
                     return self._json(dict(_RUN_STATE))
+            if u.path == "/api/build":
+                disk = build_id()
+                return self._json({"running": _BUILD, "disk": disk,
+                                   "stale": disk != _BUILD})
             if u.path == "/api/groups":
                 return self._json({"groups": self._group_rows()})
             if u.path == "/api/group":
@@ -1035,7 +1117,7 @@ pre{white-space:pre-wrap;word-break:break-word;background:#111827;padding:14px;b
 <section id="view-run" class="hide"><div class="card"><h3>➕ 新课程整理任务</h3>
 <label>素材（一行一个链接，或直接粘贴会议纪要块）。腾讯会议回放自动提取 AI 逐字稿</label>
 <textarea id="r-in" rows="6" placeholder="https://meeting.tencent.com/crm/xxxx&#10;https://meeting.tencent.com/crm/yyyy 提取码 课程标题&#10;录制: 27、langchain-向量存储Milvus概述&#10;日期: 2026-10-26 16:31:23&#10;录制文件：https://meeting.tencent.com/crm/zzzz&#10;密码：ABCD"></textarea>
-<p class="dim">两种格式可混排：① 单行 <code>链接 [提取码] [标题]</code> 或 <code>链接|提取码|标题</code>（# 开头为注释）；② 会议纪要块（<code>录制:</code> 标题、<code>录制文件：</code>链接、<code>密码：</code>提取码，日期行自动忽略），整段粘贴即可，多个课程空行分隔或换用新"录制:"行。支持批量：自动逐个提取整理。</p>
+<p class="dim">支持四种写法，可混排、可批量：① 单行 <code>链接 [提取码] [标题]</code> 或 <code>链接|提取码|标题</code>（# 开头为注释）；② 会议纪要块（<code>录制:</code> 标题、<code>录制文件：</code>链接、<code>密码：</code>提取码，日期行自动忽略）；③ 三行式 <code>标题</code> / <code>链接</code> / <code>提取码</code> 各占一行；④ 直接粘贴腾讯会议复制的链接——<code>/crm/短码/提取码/标题</code> 这种把提取码带在路径里的形式会被自动识别，无需再填。</p>
 <div class="row"><div><label>提取码（单行时使用）</label><input id="r-pw" placeholder="无则留空"></div>
 <div><label>课程标题（单行时使用）</label><input id="r-ti" placeholder="默认自动命名"></div></div>
 <button class="pri" onclick="startRun()">开始整理</button>
@@ -1246,6 +1328,17 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr = open(errlog, "a", encoding="utf-8", errors="replace")
 
     setup_logging()
+    # 日志同时落盘：由启动器拉起时 stderr 指向 devnull，没有 FileHandler
+    # 就完全看不到任何日志（排查"提取失败"时只能靠猜）。
+    _logfile = Path(cfg.data_dir) / "webui_stderr.log"
+    try:
+        _logfile.parent.mkdir(parents=True, exist_ok=True)
+        _fh = logging.FileHandler(_logfile, encoding="utf-8")
+        _fh.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s", "%H:%M:%S"))
+        logging.getLogger().addHandler(_fh)
+    except OSError:
+        pass
     Handler.cfg = cfg
     Handler.llm = _build_llm(cfg)
 
@@ -1253,7 +1346,7 @@ def main(argv: list[str] | None = None) -> int:
     used_port = args.port
     for port in (args.port, args.port + 1, args.port + 2):
         try:
-            server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            server = LocalHTTPServer(("127.0.0.1", port), Handler)
             used_port = port
             break
         except OSError:
@@ -1263,7 +1356,16 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     url = f"http://127.0.0.1:{used_port}"
+    # 记录实际监听地址：端口顺延（8686 被占）时启动器据此打开正确 URL，
+    # 而不是永远打开 8686 上那个旧实例。
+    try:
+        uf = url_file(cfg.data_dir)
+        uf.parent.mkdir(parents=True, exist_ok=True)
+        uf.write_text(url + "\n", encoding="utf-8")
+    except OSError:
+        pass
     print(f"CourseAgent 图形界面已启动: {url} （Ctrl+C 停止）")
+    _log_started(used_port)
     # 启动补归组：已过质检但未进任何课程组的历史课程，后台自动归组
     threading.Thread(target=_autogroup_backfill, args=(cfg,), daemon=True).start()
     if not args.no_browser:
@@ -1272,7 +1374,19 @@ def main(argv: list[str] | None = None) -> int:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        try:
+            url_file(cfg.data_dir).unlink(missing_ok=True)
+        except OSError:
+            pass
     return 0
+
+
+def _log_started(port: int) -> None:
+    """把启动信息也写进日志：pythonw 下控制台不可见，只能靠日志排查。"""
+    import logging
+    logging.getLogger("webui").info(
+        "GUI 启动 port=%s build=%s pid=%s", port, _BUILD, os.getpid())
 
 
 if __name__ == "__main__":

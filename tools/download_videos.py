@@ -12,9 +12,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 import urllib.request
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from course_agent.net import open_direct  # noqa: E402
 
 
 _BROWSWER_HEADERS = {
@@ -27,7 +33,7 @@ _BROWSWER_HEADERS = {
 def download(url: str, dest: Path) -> None:
     part = dest.with_suffix(dest.suffix + ".part")
     req = urllib.request.Request(url, headers=_BROWSWER_HEADERS)
-    with urllib.request.urlopen(req, timeout=120) as r, part.open("wb") as f:
+    with open_direct(req, timeout=120) as r, part.open("wb") as f:
         while True:
             chunk = r.read(1024 * 512)
             if not chunk:

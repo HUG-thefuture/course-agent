@@ -5,6 +5,54 @@
 - **本地大模型优先**（Ollama / LM Studio 等 OpenAI 兼容端点），可选外部 API 兜底（DeepSeek / 通义 / OpenAI 等）
 - **自带质检闭环**：模型生成的内容必须通过结构校验 + 忠实度抽查，不通过自动回到"思考"阶段重做
 - **核心零依赖**：只用 Python 标准库（3.10+），装上就能跑
+- **图形界面 / 命令行双入口**：双击即用，也可脚本化批处理
+
+---
+
+## 零、下载与安装（两条路，任选其一）
+
+> 本项目**不附带任何模型密钥**，装好后需自己配一个 OpenAI 兼容的模型服务（见「六、配置」）。
+
+### 方式 A：免安装版（推荐给不想装 Python 的人）
+
+1. 下载 `CourseAgent-免安装版-*.zip`，解压到任意目录（路径别带特殊符号）
+2. 双击 `CourseAgent.exe`，浏览器会自动打开界面
+3. 首次使用先配模型（两种最简单的方式）：
+   - **本地模型**：装 [Ollama](https://ollama.com/download)，命令行跑 `ollama pull qwen3:8b`，不用改配置直接可用
+   - **在线 API**：把 `config.example.json` 复制成 `config.json`，填上你的 `api_key` 与 `base_url`
+4. 在界面点「新任务」粘贴课程链接或选文件，等它跑完
+
+解压后的目录结构：
+
+```
+CourseAgent/
+├── CourseAgent.exe      ← 双击这个
+├── config.example.json  ← 复制成 config.json 后填密钥
+├── 先看我.txt           ← 精简版上手说明
+├── data/                ← 运行时自动创建（缓存、记忆库）
+└── output/              ← 整理出的课程笔记都在这
+```
+
+升级时用新版整个文件夹替换旧的即可，`data/`、`output/`、`config.json` 不受影响。
+
+### 方式 B：源码运行（推荐给开发者 / 想改代码的人）
+
+```bash
+git clone https://github.com/HUG-thefuture/course-agent.git
+cd course-agent
+python main.py demo          # 离线演示，验证环境（不需要模型）
+python main.py config        # 检查模型连通性
+python -m course_agent.web   # 启动图形界面
+```
+
+环境要求：Python 3.10+。核心功能零第三方依赖；音视频转写需 `pip install faster-whisper`，PDF 需 `pip install pypdf`。
+
+### 自己打包 exe
+
+```bash
+pip install pyinstaller
+python tools/build_exe.py --zip      # 产物在 dist/CourseAgent/，--zip 会打包到桌面
+```
 
 ---
 
@@ -120,7 +168,7 @@ python main.py batch --input D:/录屏 courses.json "https://meeting.tencent.com
 "片段/节选"处理——提示计划阶段按现有内容组织、不假设缺失部分，短录屏、半节课
 素材都能正常出产物（已用 96 秒短视频端到端验证）。
 
-## 四、核心工作流（与你要求的流程一一对应）
+## 五、核心工作流（与你要求的流程一一对应）
 
 ```
 素材加载 ──> ① 思考 ──> ② 出具计划(章节划分JSON)
@@ -142,7 +190,7 @@ python main.py batch --input D:/录屏 courses.json "https://meeting.tencent.com
 - 审查与测试都采用"代码确定性校验优先，模型判断为辅"的双保险设计
 - `config.json` 里 `max_attempts` 可调轮数，`review_source: "api"` 可让外部模型独立审查本地模型的产出，更客观
 
-## 五、配置
+## 六、配置
 
 复制 `config.example.json` 为 `config.json`（该文件含密钥已被 `.gitignore` 排除）：
 
@@ -173,7 +221,7 @@ python main.py batch --input D:/录屏 courses.json "https://meeting.tencent.com
 
 API 密钥**只**从 `config.json`（不入库）或环境变量 `COURSE_AGENT_API_KEY` 读取，永远不会出现在代码与提交记录中。
 
-## 六、“训练”：助手如何越用越好
+## 七、“训练”：助手如何越用越好
 
 本项目不做烧卡的权重微调，而是两条实证有效的路径（`improve.py`）：
 
@@ -197,7 +245,7 @@ python main.py export-sft --out data/sft.jsonl
 python tools/regen_review.py --output "output/特训营全部课程" --transcripts data/harvest_transcripts
 ```
 
-## 七、测试
+## 八、测试
 
 ```bash
 python -m unittest discover -s tests -v
@@ -207,7 +255,7 @@ python -m unittest discover -s tests -v
 计划/审查/测试各阶段校验、编排循环的失败恢复与终止保证、记忆库容量治理、CLI 端到端。
 全部离线运行（Mock 模型），无需网络与本地模型。
 
-## 八、工程保障（无逻辑错误 / 无内存泄漏）
+## 九、工程保障（无逻辑错误 / 无内存泄漏）
 
 - **循环必然终止**：外层 `max_attempts` 上限 + 内部重试上限，失败路径全部有出口
 - **资源零堆积**：HTTP 用 `urllib` 每请求独立连接（用完即关）；文件全部 `with` 托管；
@@ -216,7 +264,7 @@ python -m unittest discover -s tests -v
 - **输入容错**：GBK/UTF-8 自动识别、残缺 HTML 容忍解析、模型输出围栏/思考段/杂文均能提取
 - **异常有边界**：CLI 层统一捕获业务异常返回非零退出码，方便脚本化调用
 
-## 九、目录结构
+## 十、目录结构
 
 ```
 course-agent/
@@ -237,7 +285,7 @@ course-agent/
 └── tests/                   # 83 个离线单元测试
 ```
 
-## 十、已知边界
+## 十一、已知边界
 
 - 实时直播中的**同步**字幕抓取因平台而异，本工具面向**课后材料**（录屏、字幕、文稿）整理
 - 音视频转写首次使用需下载 whisper 模型权重（约 500MB，CPU 可跑）

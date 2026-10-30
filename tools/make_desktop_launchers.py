@@ -15,17 +15,11 @@ ROOT = Path(__file__).resolve().parent.parent
 DESKTOP = Path.home() / "Desktop"
 
 START_BAT = r"""@echo off
-rem 已有实例在运行(端口通)则只打开浏览器, 不再启动第二个服务
-powershell -NoProfile -Command "try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', 8686); $c.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
-if not errorlevel 1 (
-    start "" http://127.0.0.1:8686
-    exit /b 0
-)
 cd /d "{root}"
-rem --no-browser: 浏览器统一由本脚本打开(仅一次), 避免服务自己再开一个
-start "CourseAgent" /min "{pythonw}" -m course_agent.web --port 8686 --no-browser
-timeout /t 3 /nobreak >nul
-start "" http://127.0.0.1:8686
+rem 交给 launch_gui.py 判断：现有实例的代码版本是否与磁盘一致。
+rem 一致 → 只开浏览器；不一致（改了代码但旧进程还在跑）→ 起新实例再开。
+rem 这一步很关键：以前"端口通就只开浏览器"，导致旧进程一直服务，改动永远不生效。
+"{python}" "tools\launch_gui.py" --port 8686
 """
 
 STOP_BAT = r"""@echo off
@@ -43,20 +37,15 @@ def write_bat(path: Path, content: str) -> None:
 
 
 def main() -> int:
-    pythonw = Path(sys.executable).with_name("pythonw.exe")
-    if not pythonw.is_file():
-        # 兜底：常见安装位置
-        for cand in (Path(r"C:\Python314\pythonw.exe"),
-                     Path(r"C:\Python311\pythonw.exe")):
-            if cand.is_file():
-                pythonw = cand
-                break
-        else:
-            pythonw = Path("pythonw.exe")
+    # 启动器用控制台版 python（要显示"复用/重启"提示），pythonw 留作服务进程
+    python = Path(sys.executable)
+    if not python.is_file():
+        python = Path(r"C:\Python314\python.exe")
     # 不用 .format()——bat 里的 PowerShell 代码含 { } 会被误当占位符
-    text = START_BAT.replace("{root}", str(ROOT)).replace("{pythonw}", str(pythonw))
+    text = START_BAT.replace("{root}", str(ROOT)).replace("{python}", str(python))
     write_bat(DESKTOP / "CourseAgent图形版.bat", text)
     write_bat(DESKTOP / "CourseAgent停止.bat", STOP_BAT)
+    print("提示：若桌面已有旧版启动器，运行本脚本后即被覆盖为新版逻辑")
     return 0
 
 

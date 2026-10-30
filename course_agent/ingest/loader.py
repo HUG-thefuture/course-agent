@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ..pipeline.models import Chunk, Material, Segment
 from ..utils import safe_read_text
+from ..net import open_direct
 from . import parsers, tencent as tencent_mod
 from .hls import download_stream
 from .transcriber import transcribe_media
@@ -74,7 +75,7 @@ def fetch_url(url: str, password: str = "", timeout: int = 30) -> tuple[str, str
         real_url = real_url + sep + urllib.parse.urlencode({"password": password})
     req = urllib.request.Request(real_url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with open_direct(req, timeout=timeout) as resp:
             charset = resp.headers.get_content_charset() or "utf-8"
             raw = resp.read().decode(charset, errors="replace")
     except Exception as e:
@@ -83,6 +84,23 @@ def fetch_url(url: str, password: str = "", timeout: int = 30) -> tuple[str, str
     if not text:
         raise IngestError(f"网页未提取到正文（可能是纯脚本渲染页面）: {url}")
     return title or url, text
+
+
+def _title_from_share_url(url: str) -> str:
+    """从分享链接路径里取课程名（/crm/<短码>/<提取码>/<课程名>），取不到返回空。
+
+    腾讯会议复制出来的链接常自带课程名，比"回放课程 <短码>"可读得多。
+    """
+    parts = tencent_mod._share_path_parts(url)
+    for marker in ("crm", "cw"):
+        if marker in parts:
+            idx = parts.index(marker) + 1
+            # 短码之后依次可能是 提取码、课程名；第一个"像课程名的"就是标题
+            for cand in parts[idx + 1:]:
+                if cand and not re.fullmatch(r"[A-Za-z0-9]{3,8}", cand):
+                    return cand.strip()
+            break
+    return ""
 
 
 def load_tencent_material(url: str, password: str = "") -> Material:
@@ -95,10 +113,12 @@ def load_tencent_material(url: str, password: str = "") -> Material:
     except (ValueError, OSError) as e:
         raise IngestError(tencent_mod.guided_steps(url, str(e))) from e
     segments = [Segment(start=r["start"], text=r["text"]) for r in rows]
-    _log.info("自动提取逐字稿：%s（%s 段，约 %s 分钟）",
-              meta.get("source", "")[-12:], len(segments), meta.get("duration_min"))
-    return Material(title=f"回放课程 {tencent_mod._short_code(url)}"[:40],
-                    kind="transcript", source=url, segments=segments)
+    _log.info("自动提取逐字稿：%s（%s 段，约 %s 分钟，提取码%s）",
+              tencent_mod._short_code(url), len(segments), meta.get("duration_min"),
+              "已用" if meta.get("used_password") else "未用")
+    title = _title_from_share_url(url) or f"回放课程 {tencent_mod._short_code(url)}"
+    return Material(title=title[:40], kind="transcript", source=url,
+                    segments=segments)
 
 
 def load_source(path_or_url: str, password: str = "",

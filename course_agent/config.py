@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from .net import open_direct
+
 DEFAULT_LOCAL_BASE_URL = "http://localhost:11434/v1"
 DEFAULT_LOCAL_MODEL = "qwen3:8b"
 DEFAULT_API_BASE_URL = "https://api.deepseek.com/v1"
@@ -183,7 +185,7 @@ def _ping(base_url: str, timeout: float = 3.0) -> tuple[bool, str]:
     url = base_url.rstrip("/") + "/models"
     try:
         req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with open_direct(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
         return True, body[:500]
     except urllib.error.HTTPError as e:
@@ -195,7 +197,7 @@ def _ping(base_url: str, timeout: float = 3.0) -> tuple[bool, str]:
 
 
 def check_connectivity(cfg: AgentConfig) -> dict[str, Any]:
-    """检查本地与外部 API 可达性，返回报告字典。"""
+    """检查本地、主 API 与各服务商的可达性，返回报告字典。"""
     ok_local, detail_local = _ping(cfg.local.base_url)
     report: dict[str, Any] = {
         "local": {"reachable": ok_local, "base_url": cfg.local.base_url, "model": cfg.local.model},
@@ -206,9 +208,23 @@ def check_connectivity(cfg: AgentConfig) -> dict[str, Any]:
         report["api"]["reachable"] = ok_api
         report["api"]["base_url"] = cfg.api.base_url
         report["api"]["model"] = cfg.api.model
+        report["api"]["model_count"] = len(cfg.api.models or [cfg.api.model])
         if not ok_api:
             report["api"]["detail"] = detail_api
     else:
         report["api"]["reachable"] = None
         report["api"]["hint"] = "未启用外部 API；如需启用请在 config.json 设置 api.enabled=true 并配置密钥"
+    if cfg.providers:
+        rows = []
+        for p in cfg.providers:
+            if not (p.enabled and p.base_url and p.api_key):
+                rows.append({"name": p.name, "enabled": False,
+                             "models": len(p.models or [])})
+                continue
+            ok, detail = _ping(p.base_url, timeout=5.0)
+            rows.append({"name": p.name, "enabled": True, "reachable": ok,
+                         "base_url": p.base_url, "models": len(p.models or []),
+                         **({} if ok else {"detail": detail})})
+        report["providers"] = rows
+        report["cloud_model_total"] = sum(len(p.models or []) for p in cfg.providers)
     return report

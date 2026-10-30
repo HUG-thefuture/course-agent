@@ -45,10 +45,11 @@ class OllamaEmbedder:
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         import urllib.request
+        from .net import open_direct
         body = json.dumps({"model": self.model, "input": texts}).encode()
         req = urllib.request.Request(self.base + "/api/embed", data=body,
                                      headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=self.timeout) as r:
+        with open_direct(req, timeout=self.timeout) as r:
             d = json.loads(r.read().decode())
         embs = d.get("embeddings")
         if not embs or len(embs) != len(texts):

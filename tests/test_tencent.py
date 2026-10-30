@@ -5,14 +5,44 @@ import unittest
 
 import course_agent.ingest.loader as loader_mod
 from course_agent.ingest.loader import classify_url
-from course_agent.ingest.tencent import (add_access_code, guided_steps,
-                                         harvest_minutes, is_tencent_share,
-                                         minutes_rows, try_extract_video_url)
+from course_agent.ingest.tencent import (add_access_code, embedded_password,
+                                         guided_steps, harvest_minutes,
+                                         is_tencent_share, minutes_rows,
+                                         try_extract_video_url, _short_code)
 
 SHARE = ("https://meeting.tencent.com/v2/cloud-record/share.html"
          "?record_id=abc123&access_code=8888")
 SHARE_NO_CODE = ("https://meeting.tencent.com/v2/cloud-record/share.html"
                  "?record_id=abc123")
+
+
+class TestShortCode(unittest.TestCase):
+    """短码解析：真实链接后面常挂提取码与中文标题，不能把中文当短码。"""
+
+    def test_plain(self):
+        self.assertEqual(_short_code("https://meeting.tencent.com/crm/2ydzBry00f"),
+                         "2ydzBry00f")
+        self.assertEqual(_short_code("https://meeting.tencent.com/cw/2ydzBry00f?from=3"),
+                         "2ydzBry00f")
+
+    def test_with_embedded_password(self):
+        self.assertEqual(
+            _short_code("https://meeting.tencent.com/crm/2kqXE3Bn06/QCBC"), "2kqXE3Bn06")
+
+    def test_with_password_and_chinese_title(self):
+        url = "https://meeting.tencent.com/crm/2G6MVok995/JGCJ/大模型概述-RAG&微调&续训&智能体开发"
+        self.assertEqual(_short_code(url), "2G6MVok995")
+
+    def test_embedded_password(self):
+        self.assertEqual(embedded_password(
+            "https://meeting.tencent.com/crm/2kqXE3Bn06/QCBC"), "QCBC")
+        self.assertEqual(embedded_password(
+            "https://meeting.tencent.com/crm/2kqXE3Bn06/QCBC/大模型概述-LLM常识"), "QCBC")
+        self.assertEqual(embedded_password(
+            "https://meeting.tencent.com/crm/2ydzBry00f"), "")
+        # 第三段是中文标题而非提取码时不能误判
+        self.assertEqual(embedded_password(
+            "https://meeting.tencent.com/crm/abc123/大模型概述"), "")
 
 
 class TestDetect(unittest.TestCase):

@@ -25,6 +25,8 @@ import time
 import urllib.parse
 import urllib.request
 
+from ..net import open_direct
+
 _log = logging.getLogger(__name__)
 
 _SHARE_HOST = "meeting.tencent.com"
@@ -92,7 +94,7 @@ def _http_get(url: str, timeout: int = 30, retries: int = 2) -> str:
     for i in range(retries + 1):
         try:
             req = urllib.request.Request(url, headers=_UA)
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with open_direct(req, timeout=timeout) as r:
                 return r.read().decode("utf-8", "replace")
         except Exception as e:
             last = e
@@ -100,10 +102,48 @@ def _http_get(url: str, timeout: int = 30, retries: int = 2) -> str:
     raise OSError(f"请求失败: {last}")
 
 
+def _share_path_parts(share_url: str) -> list[str]:
+    """把分享链接路径拆成非空段（URL 解码后）。纯函数，便于测试。"""
+    path = urllib.parse.urlparse(share_url or "").path
+    return [urllib.parse.unquote(p) for p in path.split("/") if p]
+
+
 def _short_code(share_url: str) -> str:
-    path = urllib.parse.urlparse(share_url).path.rstrip("/")
-    tail = path.rsplit("/", 1)[-1]
-    return urllib.parse.unquote(tail).split("?")[0]
+    """分享链接 -> 短码。
+
+    实际遇到的几种形态（都来自腾讯会议复制出来的链接）：
+      /crm/2kqXE3Bn06                                 -> 2kqXE3Bn06
+      /crm/2kqXE3Bn06/QCBC                            -> 2kqXE3Bn06（QCBC 是提取码）
+      /crm/2kqXE3Bn06/QCBC/大模型概述-LLM常识          -> 2kqXE3Bn06
+      /cw/2kqXE3Bn06?from=3                           -> 2kqXE3Bn06
+    旧实现取「路径最后一段」，遇到后面还挂着提取码/中文标题的链接就会把中文当短码，
+    拼出的 URL 含非 ASCII 字符、urllib 直接抛 ascii codec 错误。
+    """
+    parts = _share_path_parts(share_url)
+    if not parts:
+        return ""
+    for marker in ("crm", "cw"):
+        if marker in parts:
+            idx = parts.index(marker) + 1
+            if idx < len(parts):
+                return parts[idx].split("?")[0]
+    tail = parts[-1].split("?")[0]
+    return tail
+
+
+def embedded_password(share_url: str) -> str:
+    """链接路径里内嵌的提取码（/crm/<短码>/<提取码>/<标题> 形式），没有返回空串。"""
+    parts = _share_path_parts(share_url)
+    if "crm" not in parts and "cw" not in parts:
+        return ""
+    marker = "crm" if "crm" in parts else "cw"
+    idx = parts.index(marker) + 1
+    if idx + 1 < len(parts):
+        cand = parts[idx + 1].strip()
+        # 提取码是 4~8 位字母数字；中文标题、日期等一律不算
+        if re.fullmatch(r"[A-Za-z0-9]{3,8}", cand):
+            return cand
+    return ""
 
 
 def share_uuid(share_url: str) -> str:
@@ -119,7 +159,12 @@ def share_uuid(share_url: str) -> str:
 
 
 def record_info(share: str, pwd: str) -> tuple[str, float]:
-    """share UUID + 提取码 -> (recording_id, 时长分钟)。"""
+    """share UUID + 提取码 -> (recording_id, 时长分钟)。
+
+    接口对「提取码错误」和「未提供提取码」一律返回空 base_infos（code 仍为 0），
+    因此拿不到录制时按有没有传提取码给出不同提示：没传就提示去填提取码，
+    传了就说明提取码不对或分享已失效——这样用户不会对着同一句话反复重试。
+    """
     ts = int(time.time() * 1000)
     body = _http_get(
         "https://meeting.tencent.com/wemeet-tapi/v2/meetlog/public/record-detail/"
@@ -131,7 +176,11 @@ def record_info(share: str, pwd: str) -> tuple[str, float]:
         raise ValueError(f"record-info 接口错误 code={data.get('code')} {data.get('msg', '')}")
     base = (data.get("data") or {}).get("base_infos") or []
     if not base:
-        raise ValueError("无录制文件或提取码不正确")
+        if pwd:
+            raise ValueError(
+                "提取码不正确，或该分享已被取消/过期（腾讯会议对两种情况返回相同结果）")
+        raise ValueError(
+            "该分享需要提取码（或录制已取消分享）。请在「提取码」栏填写后重试")
     return base[0]["recording_id"], int(base[0].get("duration", 0)) / 60000.0
 
 
@@ -164,14 +213,16 @@ def harvest_minutes(share_url: str, password: str = "") -> tuple[list[dict], dic
     """自动提取回放逐字稿。返回 (转写行, 元信息)。失败抛 ValueError（可读原因）。
 
     新版记录只有 split_version=1，2026-08 底前的部分记录只有 0——两者都试。
+    提取码来源优先级：显式传入 > 链接路径里内嵌的（/crm/<短码>/<码>/<标题>）。
     """
+    pwd = (password or "").strip() or embedded_password(share_url)
     share = share_uuid(share_url)
-    recording_id, duration_min = record_info(share, password)
+    recording_id, duration_min = record_info(share, pwd)
     data: dict = {}
     rows: list[dict] = []
     err = ""
     for sv in (1, 0):
-        data = minutes_detail(share, password, recording_id, split_version=sv)
+        data = minutes_detail(share, pwd, recording_id, split_version=sv)
         rows = minutes_rows(data)
         if data.get("code") == 0 and rows:
             break
@@ -181,11 +232,20 @@ def harvest_minutes(share_url: str, password: str = "") -> tuple[list[dict], dic
             raise ValueError(err or "无逐字稿数据")
         raise ValueError("该录制没有 AI 逐字稿（可能未生成或录制过短）")
     meta = {"recording_id": recording_id, "duration_min": round(duration_min, 1),
-            "source": share_url}
+            "source": share_url, "used_password": bool(pwd)}
     return rows, meta
 
 
 def guided_steps(share_url: str, reason: str = "") -> str:
+    # 原因已经很明确（缺提取码/提取码不对）时，不再甩一屏 F12 手工流程，
+    # 只给一句可执行的提示——用户要的是"下一步填什么"。
+    if reason and "提取码" in reason:
+        return (
+            f"{reason}\n"
+            f"回放链接: {share_url}\n"
+            "请把提取码填到「提取码」栏，或在输入框里写成 "
+            "`链接 提取码 课程标题` / 会议纪要块（录制: 标题 / 录制文件: 链接 / 密码: 码）后重试。"
+        )
     return (
         "无法从该腾讯会议链接自动提取逐字稿"
         + (f"（{reason}）" if reason else "")

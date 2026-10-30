@@ -1,31 +1,89 @@
 {
-  "_说明": "复制本文件为 config.json 后修改。config.json 含密钥已被 .gitignore 排除，请勿提交。",
+  "_说明": "复制本文件为 config.json 后按需修改。config.json 含密钥、已被 .gitignore 排除，请勿提交到仓库。",
+  "_最小配置": "只想快速跑起来：装好 Ollama 并 ollama pull qwen3:8b，然后什么都不用改——默认配置已经指向本地 Ollama。",
+  "_用在线API": "把 api.enabled 改成 true，填好 api.base_url / api.model / api.api_key 三项即可。任何 OpenAI 兼容服务都行（DeepSeek、通义千问、Kimi、Moonshot、OpenAI 官方等）。",
+
   "prefer": "auto",
   "review_source": "same",
   "data_dir": "data",
   "output_dir": "output",
+
   "local": {
+    "_说明": "本地模型服务。Ollama 默认 http://localhost:11434/v1；LM Studio 默认 http://localhost:1234/v1",
     "base_url": "http://localhost:11434/v1",
     "model": "qwen3:8b",
     "api_key": "",
     "timeout": 300,
     "max_retries": 2
   },
+
   "api": {
+    "_说明": "外部在线 API（可选）。enabled=true 后，本地模型失败会自动回落到这里。",
     "enabled": false,
     "base_url": "https://api.deepseek.com/v1",
     "model": "deepseek-chat",
-    "api_key": "留空则读取环境变量 COURSE_AGENT_API_KEY",
-    "timeout": 120,
-    "max_retries": 2
+    "api_key": "",
+    "_api_key_提示": "填你的密钥；留空则读取环境变量 COURSE_AGENT_API_KEY。切勿把填了密钥的文件提交到仓库。",
+    "timeout": 600,
+    "max_retries": 0,
+    "models": [],
+    "_models_提示": "可选：同服务商下多模型故障转移链，按顺序尝试，例如 [\"deepseek-chat\", \"deepseek-reasoner\"]"
   },
+
+  "vision": {
+    "_说明": "可选：视觉模型，读视频屏幕帧给编程题提供画面证据。不启用时视频仍会转写，只是没有画面信息。",
+    "enabled": false,
+    "base_url": "http://localhost:11434/v1",
+    "model": "qwen2.5vl:7b",
+    "api_key": "",
+    "timeout": 300,
+    "max_retries": 1
+  },
+
+  "providers": [
+    {
+      "_说明": "可选：额外服务商。每个服务商的 models 会依次尝试，任一失败自动切下一个。不需要就留空数组 []。",
+      "name": "某个服务商",
+      "enabled": false,
+      "base_url": "https://api.example.com/v1",
+      "api_key": "",
+      "models": ["model-a", "model-b"],
+      "timeout": 300,
+      "max_retries": 0
+    }
+  ],
+
+  "model_tiers": {
+    "_说明": "可选：按任务难度分档路由。tiers 把模型名分成 perf（高性能）与 flash（快省）两档；tasks 指定每个任务用哪档。留空则所有任务用默认链顺序。",
+    "default": "flash",
+    "tiers": {
+      "perf": [],
+      "flash": []
+    },
+    "tasks": {
+      "think": "flash",
+      "plan": "perf",
+      "review": "perf",
+      "notes": "perf",
+      "exercises": "perf",
+      "coding": "perf",
+      "qa": "perf"
+    }
+  },
+
   "pipeline": {
+    "_说明": "生成流程参数，一般不用改。",
     "chunk_chars": 3000,
     "max_attempts": 3,
     "min_exercises": 3,
     "max_exercises": 6,
     "fidelity_sample": 2,
     "fidelity_threshold": 0.8,
-    "exemplar_min_score": 70
+    "exemplar_min_score": 70,
+    "coding_practice": true,
+    "partial_chars": 3000,
+    "extract_frames": true,
+    "max_frames": 24,
+    "retry_until_pass": 2
   }
 }

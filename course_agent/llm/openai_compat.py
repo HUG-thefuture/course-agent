@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 from typing import Callable, Optional
 
+from ..net import open_direct
 from .base import BaseLLM, LLMError
 
 _log = logging.getLogger(__name__)
@@ -25,7 +26,8 @@ Transport = Callable[[urllib.request.Request, float], tuple[int, bytes]]
 
 
 def _default_transport(req: urllib.request.Request, timeout: float) -> tuple[int, bytes]:
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # 直连（绕过系统代理），避免失效的系统代理导致 10061 连接被拒
+    with open_direct(req, timeout=timeout) as resp:
         return resp.status, resp.read()
 
 
@@ -127,8 +129,11 @@ class OpenAICompatClient(BaseLLM):
                 raise LLMError(f"{self.name} HTTP {e.code}: {self._safe_body(e)}") from e
             except (urllib.error.URLError, socket.timeout, TimeoutError,
                     ConnectionError, json.JSONDecodeError, KeyError, IndexError,
-                    OSError, ValueError) as e:
-                # 网络/超时/响应格式问题：可重试
+                    TypeError, AttributeError, OSError, ValueError) as e:
+                # 网络/超时/响应格式问题：可重试。
+                # TypeError/AttributeError 也要收：部分端点（如 NVIDIA 网关的
+                # 兼容层）会返回 choices=null 之类结构，取下标就抛 TypeError，
+                # 不收会让整个 Router 链断在这里而不是切换到下一个模型。
                 last_err = e
                 if attempt < self.max_retries:
                     self._sleep_backoff(attempt)

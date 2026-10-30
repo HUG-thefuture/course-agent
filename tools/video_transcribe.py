@@ -37,12 +37,15 @@ def _download(url: str, dest: Path) -> None:
 
     COS 防盗链校验 Referer/UA，必须带浏览器同款头，否则 403。
     """
+    import sys
+    sys.path.insert(0, str(ROOT))
+    from course_agent.net import open_direct
     part = dest.with_suffix(dest.suffix + ".part")
     req = urllib.request.Request(url, headers={
         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                        "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"),
         "Referer": "https://meeting.tencent.com/"})
-    with urllib.request.urlopen(req, timeout=120) as r, part.open("wb") as f:
+    with open_direct(req, timeout=120) as r, part.open("wb") as f:
         while True:
             chunk = r.read(1024 * 512)
             if not chunk:

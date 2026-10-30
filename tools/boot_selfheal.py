@@ -29,6 +29,8 @@ OLLAMA = "http://127.0.0.1:11434/api/tags"
 _WAIT_MAX = 15 * 60
 _WAIT_POLL = 15
 
+sys.path.insert(0, str(ROOT))
+
 _PS_SUPERVISOR = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR "
                   "Name='pythonw.exe'\" | Where-Object { $_.CommandLine -match "
                   "'supervisor[.]py' } | Select-Object -ExpandProperty ProcessId")
@@ -46,7 +48,8 @@ def log(msg: str) -> None:
 
 def ollama_ready() -> bool:
     try:
-        with urllib.request.urlopen(OLLAMA, timeout=5) as resp:
+        from course_agent.net import open_direct
+        with open_direct(urllib.request.Request(OLLAMA), timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         return bool(data.get("models"))
     except Exception:

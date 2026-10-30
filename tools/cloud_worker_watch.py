@@ -30,6 +30,7 @@ def key_ready() -> str:
 
 def smoke_test(cfg) -> tuple[bool, str]:
     import urllib.request
+    from course_agent.net import open_direct
     body = json.dumps({
         "model": cfg.api.model,
         "messages": [{"role": "user", "content": "回复两个字：收到"}],
@@ -40,7 +41,7 @@ def smoke_test(cfg) -> tuple[bool, str]:
         headers={"Content-Type": "application/json",
                  "Authorization": f"Bearer {cfg.api_key_effective}"})
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with open_direct(req, timeout=60) as r:
             data = json.loads(r.read().decode("utf-8", "replace"))
         text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
         return True, truncate_text(text, 40)

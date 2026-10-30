@@ -1,15 +1,33 @@
 # Python
 __pycache__/
 *.pyc
+*.pyo
 .venv/
 venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# IDE / 绯荤粺
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
 
 # 杩愯鏃朵骇鐗╀笌鏈湴瀵嗛挜锛堢粷涓嶅叆搴擄級
 data/
 output/
-config.json
 *.log
 
-# 绯荤粺
-.DS_Store
-Thumbs.db
+# 閰嶇疆鏂囦欢锛氱湡瀹為厤缃惈瀵嗛挜锛屽彧鎻愪氦 config.example.json
+config.json
+*.bak
+*~
+*:Zone.Identifier
+
+# 鎵撳寘浜х墿
+dist/
+build/
+CourseAgent-*.zip
+# PyInstaller 自动生成的构建描述文件
+*.spec

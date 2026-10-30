@@ -21,6 +21,11 @@ import time
 import urllib.request
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from course_agent.net import open_direct  # noqa: E402
+
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 UA = {"User-Agent": "Mozilla/5.0 (CourseAgent harvest/1.0)"}
 
@@ -30,7 +35,7 @@ def _get(url: str, timeout: int = 30, retries: int = 2) -> str:
     for i in range(retries + 1):
         try:
             req = urllib.request.Request(url, headers=UA)
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with open_direct(req, timeout=timeout) as r:
                 return r.read().decode("utf-8", "replace")
         except Exception as e:  # 网络抖动重试
             last = e

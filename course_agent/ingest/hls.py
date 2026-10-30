@@ -15,6 +15,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from ..net import open_direct
+
 _log = logging.getLogger(__name__)
 
 _CHUNK = 256 * 1024
@@ -28,7 +30,7 @@ class DownloadError(Exception):
 def _http_get(url: str, timeout: int = 30) -> bytes:
     req = urllib.request.Request(url, headers=_UA, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with open_direct(req, timeout=timeout) as resp:
             return resp.read()
     except Exception as e:
         raise DownloadError(f"请求失败 {url}: {e}") from e
@@ -83,7 +85,7 @@ def download_direct(url: str, out_path: Path) -> Path:
     req = urllib.request.Request(url, headers=_UA, method="GET")
     _log.info("直链下载: %s", url[:100])
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp, \
+        with open_direct(req, timeout=60) as resp, \
                 out_path.open("wb") as f:
             while True:
                 chunk = resp.read(_CHUNK)
