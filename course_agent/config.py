@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -133,6 +134,19 @@ def _merge(dc_instance: Any, patch: dict[str, Any]) -> Any:
     return dc_instance
 
 
+def app_dir() -> Path:
+    """程序所在目录：打包成 exe 后是 exe 自身所在目录，源码运行时是项目根。
+
+    为什么需要它：PyInstaller 单文件版运行时会把资源解压到临时目录，
+    `Path(__file__)` 指向临时目录；而用户把 config.json 放在 exe 旁边，
+    双击时的工作目录也不一定是 exe 所在目录。统一用本函数定位"用户视角的
+    程序目录"，config.json / data / output 都相对它解析。
+    """
+    if getattr(sys, "frozen", False):          # PyInstaller 打包后
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
 def load_config(path: str | Path | None = None) -> AgentConfig:
     """从 JSON 文件加载配置；缺省时依次找 ./config.json，否则用默认值。"""
     cfg = AgentConfig()
@@ -142,9 +156,18 @@ def load_config(path: str | Path | None = None) -> AgentConfig:
     env_path = os.environ.get("COURSE_AGENT_CONFIG")
     if env_path:
         candidates.append(Path(env_path))
+    # 优先级：显式路径 > 环境变量 > exe/项目目录 > 当前工作目录
+    candidates.append(app_dir() / "config.json")
     candidates.append(Path("config.json"))
+    seen: set[str] = set()
     for p in candidates:
-        if p and Path(p).is_file():
+        if not p:
+            continue
+        key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        if Path(p).is_file():
             data = json.loads(Path(p).read_text(encoding="utf-8"))
             _merge(cfg.local, data.get("local", {}))
             _merge(cfg.api, data.get("api", {}))
@@ -159,6 +182,14 @@ def load_config(path: str | Path | None = None) -> AgentConfig:
                 if k in data:
                     setattr(cfg, k, data[k])
             break
+    # 相对路径的 data/output 一律相对"程序目录"解析，而不是当前工作目录。
+    # 双击 exe 时工作目录可能是任意位置（甚至临时目录），不锚定就会把课程
+    # 产物写到用户找不到的地方。
+    base = app_dir()
+    for attr in ("data_dir", "output_dir"):
+        val = getattr(cfg, attr)
+        if val and not Path(val).is_absolute():
+            setattr(cfg, attr, str(base / val))
     return cfg
 
 

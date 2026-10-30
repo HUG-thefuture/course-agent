@@ -13,15 +13,18 @@
 
 > 本项目**不附带任何模型密钥**，装好后需自己配一个 OpenAI 兼容的模型服务（见「六、配置」）。
 
-### 方式 A：免安装版（推荐给不想装 Python 的人）
+### 方式 A：单文件 exe（推荐给不想装 Python 的人）
 
-**直接下载**：[CourseAgent v1.0 免安装版](https://github.com/HUG-thefuture/course-agent/releases/latest)（Windows 10/11 64 位，约 12 MB，无需装 Python）
+**直接下载**：[CourseAgent v1.0](https://github.com/HUG-thefuture/course-agent/releases/latest)（Windows 10/11 64 位，11 MB，**就一个 exe**，无需装 Python）
 
-1. 下载 `CourseAgent-v1.0.0-win64-portable.zip`，解压到任意目录（路径别带特殊符号）
-2. 双击 `CourseAgent.exe`，浏览器会自动打开界面
+1. 下载 `CourseAgent-v1.0.0-win64.exe`，放到任意文件夹（路径别带特殊符号）
+2. 双击运行，浏览器会自动打开界面
 3. 首次使用先配模型（两种最简单的方式）：
    - **本地模型**：装 [Ollama](https://ollama.com/download)，命令行跑 `ollama pull qwen3:8b`，不用改配置直接可用
-   - **在线 API**：把 `config.example.json` 复制成 `config.json`，填上你的 `api_key` 与 `base_url`
+   - **在线 API**：首次运行会在 exe 旁生成 `config.example.json`，复制成 `config.json`，填上你的 `api_key` 与 `base_url`
+
+> 单文件版启动时需先解压资源，冷启动约 3-5 秒属正常。想先验证环境可跑 `CourseAgent.exe demo`（离线演示，不需要模型）。
+> `data/`、`output/`、`config.json` 都在 exe 旁边生成，升级时只替换 exe 即可。
 4. 在界面点「新任务」粘贴课程链接或选文件，等它跑完
 
 解压后的目录结构：
@@ -53,8 +56,16 @@ python -m course_agent.web   # 启动图形界面
 
 ```bash
 pip install pyinstaller
-python tools/build_exe.py --zip      # 产物在 dist/CourseAgent/，--zip 会打包到桌面
+
+# 单文件版（一个 exe，11 MB，适合分发）
+python tools/build_exe.py --onefile --clean --to-desktop
+
+# 目录版（启动更快，适合自己常用）
+python tools/build_exe.py --clean --zip      # 产物在 dist/CourseAgent/
 ```
+
+> 打包时会排除 `faster-whisper`/`onnxruntime` 等重型可选依赖（体积 365MB → 25MB）。
+> 若需要本地音视频转写，加 `--with-whisper`。
 
 ---
 

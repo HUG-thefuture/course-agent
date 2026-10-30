@@ -37,10 +37,43 @@ ENTRY_SRC = '''"""CourseAgent 统一入口（打包用）。
     CourseAgent.exe run --input x.srt    # 整理单个文件
 """
 import sys
+from pathlib import Path
+
+# 单文件版打包进来的示例配置（解压在临时目录），首次运行时拷到 exe 旁边，
+# 让用户知道该改哪个文件。
+EXAMPLE_NAME = "config.example.json"
+
+
+def app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def ensure_example_config() -> None:
+    """首次运行：程序目录没有 config.json 就放一份示例，并提示怎么改。"""
+    target = app_dir() / EXAMPLE_NAME
+    if target.exists():
+        return
+    candidates = [
+        Path(getattr(sys, "_MEIPASS", "")) / EXAMPLE_NAME,   # onefile 解压目录
+        Path(__file__).resolve().parent / EXAMPLE_NAME,      # onedir 同级
+    ]
+    for src in candidates:
+        try:
+            if src.is_file():
+                target.write_bytes(src.read_bytes())
+                print(f"[提示] 已生成配置模板：{target}")
+                print(f"       需要改模型的话，复制成 config.json 再编辑。")
+                return
+        except OSError:
+            continue
 
 
 def main() -> int:
     args = sys.argv[1:]
+    ensure_example_config()
+
     if not args:
         from course_agent.webui import main as gui_main
         return gui_main([])
@@ -90,11 +123,12 @@ def prepare_entry(tmp: Path) -> Path:
     return p
 
 
-def run_pyinstaller(entry: Path, clean: bool, with_whisper: bool) -> int:
+def run_pyinstaller(entry: Path, clean: bool, with_whisper: bool,
+                    onefile: bool = False) -> int:
     args = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
-        "--onedir",
+        "--onefile" if onefile else "--onedir",
         "--name", APP_NAME,
         "--console",                      # 保留控制台：日志可见，排错友好
         "--paths", str(ROOT),
@@ -119,6 +153,11 @@ def run_pyinstaller(entry: Path, clean: bool, with_whisper: bool) -> int:
     ex = ROOT / "examples"
     if ex.is_dir():
         args += ["--add-data", f"{ex}{sep}examples"]
+    # 示例配置随包带上：onedir 会拷到根目录给用户改；onefile 首次运行时
+    # 由入口脚本从解压目录拷到 exe 旁边。
+    example_cfg = ROOT / "config.example.json"
+    if example_cfg.is_file():
+        args += ["--add-data", f"{example_cfg}{sep}."]
     args.append(str(entry))
     log("执行: " + " ".join(args[3:]))
     return subprocess.run(args, cwd=str(ROOT)).returncode
@@ -219,10 +258,36 @@ def make_zip(dist_root: Path) -> Path:
     return out
 
 
+def build_onefile(entry: Path, clean: bool) -> Path | None:
+    """单文件版：产出 dist/CourseAgent.exe，直接拷到桌面即可单独分发。
+
+    注意单文件版的代价：每次启动要把约 25MB 资源解压到临时目录，
+    冷启动约 3-5 秒（比 onedir 慢），且部分杀软对 onefile 更敏感。
+    好处是"就一个 exe"，适合发给不折腾的人。
+    """
+    log("构建单文件版…")
+    rc = run_pyinstaller(entry, clean, with_whisper=False, onefile=True)
+    if rc != 0:
+        log(f"单文件构建失败，退出码 {rc}")
+        return None
+    exe = ROOT / "dist" / f"{APP_NAME}.exe"
+    if not exe.is_file():
+        log("未找到 dist/CourseAgent.exe")
+        return None
+    # 单文件版把说明文件一起带上没意义（用户只拿到一个 exe），
+    # 所以改成启动时自检：config.json 不存在就在程序目录生成一份示例。
+    log(f"单文件完成：{exe}（{exe.stat().st_size / 1e6:.1f} MB）")
+    return exe
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="打包 CourseAgent 免安装版")
     ap.add_argument("--clean", action="store_true", help="先清理 build/ dist/")
     ap.add_argument("--zip", action="store_true", help="构建后打成 zip 放桌面")
+    ap.add_argument("--onefile", action="store_true",
+                    help="构建单文件 exe（一个文件直接分发，启动稍慢）")
+    ap.add_argument("--to-desktop", action="store_true",
+                    help="把产物直接拷到桌面")
     ap.add_argument("--with-whisper", action="store_true",
                     help="包含本地音视频转写依赖（体积约 350MB）")
     args = ap.parse_args(argv[1:])
@@ -237,6 +302,16 @@ def main(argv: list[str]) -> int:
     tmp = ROOT / "build" / "_entry"
     tmp.mkdir(parents=True, exist_ok=True)
     entry = prepare_entry(tmp)
+
+    if args.onefile:
+        exe = build_onefile(entry, args.clean)
+        if exe is None:
+            return 1
+        if args.to_desktop:
+            dest = DESKTOP / exe.name
+            shutil.copy2(exe, dest)
+            log(f"已拷到桌面：{dest}")
+        return 0
 
     rc = run_pyinstaller(entry, args.clean, args.with_whisper)
     if rc != 0:
