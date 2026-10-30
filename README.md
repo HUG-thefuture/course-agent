@@ -15,7 +15,9 @@
 
 ### 方式 A：免安装版（推荐给不想装 Python 的人）
 
-1. 下载 `CourseAgent-免安装版-*.zip`，解压到任意目录（路径别带特殊符号）
+**直接下载**：[CourseAgent v1.0 免安装版](https://github.com/HUG-thefuture/course-agent/releases/latest)（Windows 10/11 64 位，约 12 MB，无需装 Python）
+
+1. 下载 `CourseAgent-v1.0.0-win64-portable.zip`，解压到任意目录（路径别带特殊符号）
 2. 双击 `CourseAgent.exe`，浏览器会自动打开界面
 3. 首次使用先配模型（两种最简单的方式）：
    - **本地模型**：装 [Ollama](https://ollama.com/download)，命令行跑 `ollama pull qwen3:8b`，不用改配置直接可用
