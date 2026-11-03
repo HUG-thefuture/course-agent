@@ -13,21 +13,41 @@
 
 > 本项目**不附带任何模型密钥**，装好后需自己配一个 OpenAI 兼容的模型服务（见「六、配置」）。
 
-### 方式 A：单文件 exe（推荐给不想装 Python 的人）
+### 方式 A：下载现成版本（推荐给不想装 Python 的人）
 
-**直接下载**：[CourseAgent v1.0](https://github.com/HUG-thefuture/course-agent/releases/latest)（Windows 10/11 64 位，11 MB，**就一个 exe**，无需装 Python）
+**直接下载**：[CourseAgent v1.1](https://github.com/HUG-thefuture/course-agent/releases/latest)（Windows 10/11 64 位，无需装 Python）
 
-1. 下载 `CourseAgent-v1.0.0-win64.exe`，放到任意文件夹（路径别带特殊符号）
-2. 双击运行，浏览器会自动打开界面
-3. 首次使用先配模型（两种最简单的方式）：
-   - **本地模型**：装 [Ollama](https://ollama.com/download)，命令行跑 `ollama pull qwen3:8b`，不用改配置直接可用
-   - **在线 API**：首次运行会在 exe 旁生成 `config.example.json`，复制成 `config.json`，填上你的 `api_key` 与 `base_url`
+两种版本按需选：
 
-> 单文件版启动时需先解压资源，冷启动约 3-5 秒属正常。想先验证环境可跑 `CourseAgent.exe demo`（离线演示，不需要模型）。
-> `data/`、`output/`、`config.json` 都在 exe 旁边生成，升级时只替换 exe 即可。
-4. 在界面点「新任务」粘贴课程链接或选文件，等它跑完
+| 版本 | 文件 | 适用 |
+|---|---|---|
+| **单文件版** | `CourseAgent-v1.1.0-win64.exe`（15 MB） | 想走**安装向导、自选装到哪** |
+| **目录版** | `CourseAgent-v1.1.0-portable.zip`（14 MB） | **解压即用**，不装任何东西 |
 
-解压后的目录结构：
+**单文件版**（支持自选安装位置）：
+
+```bat
+CourseAgent-v1.1.0-win64.exe --install      :: 弹安装向导，自选目录
+CourseAgent-v1.1.0-win64.exe --uninstall    :: 卸载（只删快捷方式，数据保留）
+```
+
+向导会问装到哪个目录（默认避开空间紧张的 C 盘）、是否建桌面/开始菜单快捷方式。
+静默安装：`CourseAgent.exe --install "D:\工具" --silent`
+
+**目录版**：解压到任意目录 → 双击 `CourseAgent.exe`。
+
+> **重要**：单文件版请用安装向导装到正常目录（如 `C:\CourseAgent`、`D:\工具`）。
+> 不要直接丢在受 ACL 限制的文件夹里跑——PyInstaller 单文件版启动时要在 exe 同目录
+> 解压临时文件，权限受限时会报 `Could not create temporary directory!` 直接退出
+> （改 TEMP 环境变量、加 `--runtime-tmpdir` 都无效，实测过）。目录版没有这个限制。
+
+**两个版本通用**：首次运行会在程序旁生成 `config.example.json`；配模型二选一：
+- **本地模型**：装 [Ollama](https://ollama.com/download)，跑 `ollama pull qwen3:8b`，不用改配置
+- **在线 API**：复制 `config.example.json` 为 `config.json`，填 `api_key` 与 `base_url`
+
+想先验证环境可跑 `CourseAgent.exe demo`（离线演示，不需要模型）。
+
+目录版解压后的结构：
 
 ```
 CourseAgent/
@@ -38,7 +58,7 @@ CourseAgent/
 └── output/              ← 整理出的课程笔记都在这
 ```
 
-升级时用新版整个文件夹替换旧的即可，`data/`、`output/`、`config.json` 不受影响。
+升级时用新版替换旧的即可，`data/`、`output/`、`config.json` 不受影响。
 
 ### 方式 B：源码运行（推荐给开发者 / 想改代码的人）
 
@@ -57,15 +77,22 @@ python -m course_agent.web   # 启动图形界面
 ```bash
 pip install pyinstaller
 
-# 单文件版（一个 exe，11 MB，适合分发）
-python tools/build_exe.py --onefile --clean --to-desktop
+# 单文件版（一个 exe，15 MB，适合分发）
+python tools/build_exe.py --onefile --to-desktop
 
-# 目录版（启动更快，适合自己常用）
-python tools/build_exe.py --clean --zip      # 产物在 dist/CourseAgent/
+# 目录版（启动更快，不受文件夹 ACL 限制）
+python tools/build_exe.py --zip              # 产物在 dist/CourseAgent/
+
+# 两个版本依次构建时，记得先给目录版改名，否则会被单文件版覆盖
+python tools/build_exe.py --zip && mv dist/CourseAgent dist/CourseAgent-portable
+python tools/build_exe.py --onefile --to-desktop
 ```
 
-> 打包时会排除 `faster-whisper`/`onnxruntime` 等重型可选依赖（体积 365MB → 25MB）。
+> 打包时会排除 `faster-whisper`/`onnxruntime` 等重型可选依赖（体积 365MB → 30MB）。
 > 若需要本地音视频转写，加 `--with-whisper`。
+>
+> 注意别把 `tkinter` 放进 `--exclude-module`：安装向导要用它，
+> 一边排除一边 hidden-import 会让包损坏。
 
 ---
 
