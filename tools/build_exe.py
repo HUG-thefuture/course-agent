@@ -26,6 +26,17 @@ ROOT = Path(__file__).resolve().parent.parent
 APP_NAME = "CourseAgent"
 DESKTOP = Path.home() / "Desktop"
 
+# 单文件版的运行时解压目录：必须是纯 ASCII，否则 exe 放在中文路径下时
+# bootloader 建临时目录失败（[PYI-xxx:ERROR] Could not create temporary directory!）。
+ASCII_TMPDIR = r"C:\CourseAgentRuntime"
+
+
+def _ensure_ascii_tmpdir() -> None:
+    try:
+        Path(ASCII_TMPDIR).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
 # 入口：双击无参数 → 开图形界面；带子命令 → 走命令行。
 # 两者都要有：GUI 面向普通用户，CLI 面向批处理与排错（config / demo / run / fetch）。
 ENTRY_SRC = '''"""CourseAgent 统一入口（打包用）。
@@ -71,7 +82,43 @@ def ensure_example_config() -> None:
 
 
 def main() -> int:
+    # PyInstaller 单文件版在"含中文的路径"下会报
+    #   [PYI-xxxx:ERROR] Could not create temporary directory!
+    # 原因是启动早期它用系统编码拼接临时目录，中文路径解不开。
+    # 修法：在任何 import 之前把 TEMP/TMP 指向纯 ASCII 的安全目录。
+    # 这段必须位于文件最前面（早于 tkinter / course_agent 的导入）。
+    import os
+    import tempfile
+
+    def _ascii_safe_temp() -> None:
+        for cand in (os.environ.get("TEMP", ""), os.environ.get("TMP", "")):
+            try:
+                root = os.path.splitdrive(os.path.abspath(cand))[0] or "C:"
+            except Exception:
+                continue
+            if not root:
+                continue
+            safe = os.path.join(root + os.sep, "CourseAgentTemp")
+            if all(ord(ch) < 128 for ch in safe):
+                try:
+                    os.makedirs(safe, exist_ok=True)
+                    os.environ["TEMP"] = safe
+                    os.environ["TMP"] = safe
+                    return
+                except OSError:
+                    continue
+
+    if getattr(sys, "frozen", False):
+        _ascii_safe_temp()
+
     args = sys.argv[1:]
+
+    # 安装/卸载向导：让用户自选安装位置（绿色安装，不写注册表）。
+    # 放在 ensure_example_config 之前——安装动作本身不该往"当前目录"写东西。
+    if "--install" in args or "--uninstall" in args:
+        from course_agent.installer import main as installer_main
+        return installer_main(args)
+
     ensure_example_config()
 
     if not args:
@@ -100,16 +147,20 @@ BUNDLE_FILES = [
 ]
 
 
-# 可选的重型依赖：本机装了 fater-whisper/scipy/grpc 等时，PyInstaller 会把它们
+# 可选的重型依赖：本机装了 faster-whisper/scipy/grpc 等时，PyInstaller 会把它们
 # 连同一堆 dll（ctranslate2 56MB、onnxruntime 36MB、scipy 20MB、avcodec 18MB…）
 # 一起拖进包，体积从 40MB 膨胀到 360MB。这些只服务于"本地音视频转写"这一个可选
 # 功能，教学/分享版默认排除；需要转写的人用 --with-whisper 构建完整版。
+#
+# 注意：**不要**把 tkinter 放这里。安装向导（--install）需要它，
+# 一边 --exclude-module tkinter 一边 --hidden-import tkinter 会让包损坏，
+# 单文件版启动即报 "Could not create temporary directory"。
 OPTIONAL_EXCLUDES = [
     "faster_whisper", "ctranslate2", "onnxruntime", "tokenizers", "transformers",
     "torch", "torchaudio", "numpy", "scipy", "pandas", "matplotlib",
     "grpc", "google", "pypdf", "chromadb", "sklearn", "PIL", "cv2",
     "IPython", "jupyter", "notebook", "pytest", "setuptools", "pip",
-    "tkinter", "test", "unittest",
+    "test", "unittest",
 ]
 
 
@@ -134,7 +185,24 @@ def run_pyinstaller(entry: Path, clean: bool, with_whisper: bool,
         "--paths", str(ROOT),
         # 只收集本项目的包，不把整个环境塞进去
         "--hidden-import", "course_agent.webui",
+        # 安装向导（--install）用 tkinter 弹目录选择框；它是惰性导入，
+        # PyInstaller 静态分析不到，必须显式声明。
+        "--hidden-import", "course_agent.installer",
+        "--hidden-import", "tkinter",
+        "--hidden-import", "tkinter.filedialog",
+        "--hidden-import", "tkinter.messagebox",
+        "--hidden-import", "tkinter.ttk",
     ]
+    if onefile:
+        # 说明（实测结论，别再踩）：单文件版启动时要把自身解压到临时目录，
+        # PyInstaller 的 bootloader 会在**exe 所在目录**先建 _MEIxxxx 临时目录。
+        # 若该目录被 ACL 限制了 DeleteSubdirectoriesAndFiles（本机 Desktop\学习
+        # 就是这种），bootloader 建目录失败并直接退出：
+        #   [PYI-xxxx:ERROR] Could not create temporary directory!
+        # ——进程还没跑到 Python 代码，所以改 TEMP 环境变量、--runtime-tmpdir
+        # 都无效（两种都实测过）。因此单文件版必须**安装到正常目录**再运行，
+        # 这正是 --install 安装向导的价值；目录版则不受此限制。
+        pass
     if not with_whisper:
         for mod in OPTIONAL_EXCLUDES:
             args += ["--exclude-module", mod]
