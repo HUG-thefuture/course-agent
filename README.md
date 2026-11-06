@@ -208,6 +208,19 @@ python main.py batch --input D:/录屏 courses.json "https://meeting.tencent.com
 "片段/节选"处理——提示计划阶段按现有内容组织、不假设缺失部分，短录屏、半节课
 素材都能正常出产物（已用 96 秒短视频端到端验证）。
 
+**课程去重与体检**（同一门课反复整理、或产物被删后留下的残留引用）：
+
+```bash
+python tools/audit_courses.py            # 只读体检：重复/幽灵成员/残缺/孤儿进度
+python tools/dedup_courses.py            # 预览重复项
+python tools/dedup_courses.py --apply    # 重复目录移入 data/dup_trash/（可还原）
+python tools/dedup_courses.py --restore "data/dup_trash/<时间戳>"
+python tools/dedup_courses.py --clean-ghosts --apply   # 清理组.json 幽灵成员
+```
+
+`audit_courses.py` 输出人类可读报告，`--json` 可导出供脚本处理；只有结构性错误
+（重复、幽灵成员、残缺产物）会让退出码非 0，未通过质检与空目录仅作提示。
+
 ## 五、核心工作流（与你要求的流程一一对应）
 
 ```
