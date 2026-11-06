@@ -20,6 +20,9 @@
   python tools/dedup_courses.py                 # 预览
   python tools/dedup_courses.py --apply         # 隔离重复项
   python tools/dedup_courses.py --apply --purge # 直接永久删除（不推荐）
+  python tools/dedup_courses.py --clean-ghosts --apply
+                                                # 只清理组.json 里指向已删课程的
+                                                # 幽灵成员（不碰课程目录）
   python tools/dedup_courses.py --restore data/dup_trash/<时间戳>   # 还原某次隔离
 """
 
@@ -195,6 +198,47 @@ def drop_vec_cache(course_ids: set[str], dry: bool) -> int:
     return n
 
 
+def find_ghost_members(out_root: Path, alive_ids: set[str]) -> list[tuple[Path, str, dict]]:
+    """找出组.json 里引用了「已不存在课程」的幽灵成员。
+
+    来源：课程产物被手工删掉、或验证用临时课程清理后，组.json 没同步更新。
+    返回 [(组.json路径, 幽灵成员id, 原始数据)]。
+    """
+    dest = out_root / GROUPS_SUBDIR
+    ghosts: list[tuple[Path, str, dict]] = []
+    if not dest.is_dir():
+        return ghosts
+    alive_names = {i.split("/")[-1] for i in alive_ids}
+    for gdir in sorted(dest.iterdir()):
+        gp = gdir / "组.json"
+        if not gdir.is_dir() or not gp.is_file():
+            continue
+        data = read_json(gp)
+        for c in data.get("courses") or []:
+            cid = str(c).replace("\\", "/")
+            if cid not in alive_ids and cid.split("/")[-1] not in alive_names:
+                ghosts.append((gp, c, data))
+    return ghosts
+
+
+def clean_ghosts(ghosts: list[tuple[Path, str, dict]], dry: bool) -> list[str]:
+    """从组.json 删除幽灵成员；返回被修改的组名。"""
+    by_file: dict[Path, tuple[dict, set[str]]] = {}
+    for gp, member, data in ghosts:
+        if gp not in by_file:
+            by_file[gp] = (data, set())
+        by_file[gp][1].add(member)
+    touched = []
+    for gp, (data, bad) in sorted(by_file.items()):
+        name = data.get("name") or gp.parent.name
+        touched.append(f"{name}({len(bad)})")
+        if not dry:
+            data["courses"] = [c for c in (data.get("courses") or []) if c not in bad]
+            gp.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                          encoding="utf-8")
+    return touched
+
+
 def move_to_trash(dirs: list[Path], out_root: Path, dry: bool) -> Path | None:
     """把目录移到 data/dup_trash/<时间戳>/ 下（保留相对路径结构，便于还原）。"""
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -241,6 +285,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--apply", action="store_true", help="真正隔离（默认只预览）")
     ap.add_argument("--purge", action="store_true", help="隔离时直接永久删除，不进回收站")
     ap.add_argument("--restore", default="", help="还原某次隔离：传 data/dup_trash/<时间戳>")
+    ap.add_argument("--clean-ghosts", action="store_true",
+                    help="只清理组.json 里指向已删课程的幽灵成员，不碰课程目录")
     args = ap.parse_args(argv[1:])
 
     out_root = Path(args.outdir).resolve()
@@ -250,8 +296,28 @@ def main(argv: list[str]) -> int:
         return 0 if n >= 0 else 1
 
     dirs = iter_courses(out_root)
-    if not dirs:
+    if not dirs and not args.clean_ghosts:
         print(f"{out_root} 下没有课程产物")
+        return 0
+
+    alive_ids = {d.relative_to(out_root).as_posix() for d in dirs}
+    ghosts = find_ghost_members(out_root, alive_ids)
+
+    # 幽灵成员清理（与去重独立，即使没有重复也要能跑）
+    if ghosts or args.clean_ghosts:
+        print(f"组.json 幽灵成员：{len(ghosts)} 个")
+        for gp, member, _ in ghosts:
+            print(f"  {gp.parent.name} <- {member}")
+        touched = clean_ghosts(ghosts, dry=not args.apply)
+        if touched:
+            print(f"{'将' if not args.apply else '已'}清理：{', '.join(touched)}")
+        else:
+            print("  （无）")
+        if not args.apply:
+            print("\n预览模式。执行清理：python tools/dedup_courses.py --clean-ghosts --apply")
+        print()
+
+    if args.clean_ghosts:
         return 0
 
     courses = [course_info(d) for d in dirs]

@@ -157,5 +157,59 @@ class TestSideEffects(unittest.TestCase):
             dd.TRASH_ROOT = orig_trash
 
 
+class TestGhostMembers(unittest.TestCase):
+    """组.json 里指向已删课程的幽灵成员清理。"""
+
+    def setUp(self):
+        self.fx = _Fixture()
+
+    def tearDown(self):
+        self.fx.cleanup()
+
+    def _group(self, members):
+        gdir = self.fx.out / "课程整合" / "组A"
+        gdir.mkdir(parents=True)
+        gp = gdir / "组.json"
+        gp.write_text(json.dumps({"name": "组A", "courses": members}),
+                      encoding="utf-8")
+        return gp
+
+    def test_detect_ghosts(self):
+        self.fx.add("webui/alive", "还在的课")
+        gp = self._group(["webui/alive", "webui/deleted", "top-level-gone"])
+        alive = {"webui/alive", "also-alive"}
+        ghosts = dd.find_ghost_members(self.fx.out, alive)
+        self.assertEqual(len(ghosts), 2)
+        self.assertEqual({m for _, m, _ in ghosts},
+                         {"webui/deleted", "top-level-gone"})
+
+    def test_no_false_positive_for_webui_prefixed_id(self):
+        """组.json 存目录名时也应认得出来，不误报。"""
+        self._group(["alive-course"])
+        ghosts = dd.find_ghost_members(self.fx.out, {"webui/alive-course"})
+        self.assertEqual(ghosts, [])
+
+    def test_clean_dry_run_keeps_file(self):
+        gp = self._group(["keep", "ghost"])
+        ghosts = dd.find_ghost_members(self.fx.out, {"keep"})
+        dd.clean_ghosts(ghosts, dry=True)
+        self.assertIn("ghost", json.loads(gp.read_text(encoding="utf-8"))["courses"])
+
+    def test_clean_removes_only_ghosts(self):
+        gp = self._group(["keep", "ghost1", "ghost2"])
+        ghosts = dd.find_ghost_members(self.fx.out, {"keep"})
+        touched = dd.clean_ghosts(ghosts, dry=False)
+        self.assertEqual(len(touched), 1)
+        self.assertEqual(json.loads(gp.read_text(encoding="utf-8"))["courses"],
+                         ["keep"])
+
+    def test_clean_is_idempotent(self):
+        gp = self._group(["keep"])
+        self.assertEqual(dd.find_ghost_members(self.fx.out, {"keep"}), [])
+        dd.clean_ghosts([], dry=False)
+        self.assertEqual(json.loads(gp.read_text(encoding="utf-8"))["courses"],
+                         ["keep"])
+
+
 if __name__ == "__main__":
     unittest.main()
