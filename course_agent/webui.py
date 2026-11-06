@@ -233,7 +233,13 @@ def parse_run_lines(text: str) -> list[dict]:
                 and not any(k in low for k in _KW_TITLE)):
             return "password"
         if any(k in low for k in _KW_SOURCE):
-            return "source"
+            # 标签像「文件/链接/回顾/回放」，但值不是 URL 也不是路径时，
+            # 实际常是「回顾: 课程标题」这类写法——必须按标题处理。
+            # 否则会把标题写进 source，覆盖掉后面真正的链接（用户日志里
+            # 「文件不存在: 回顾: 3、xxx」就是这个 bug）。
+            if re.search(r"[\\/]|^[A-Za-z]:", val) or _URL_OR_FILE.search(val):
+                return "source"
+            return "title"
         return "title"
 
     items: list[dict] = []

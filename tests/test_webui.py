@@ -197,6 +197,39 @@ class TestUniversalLabelParsing(unittest.TestCase):
             "source": self.URL, "password": "6FTY",
             "title": "3、langgraph-数据隔离&状态合并"}])
 
+    def test_review_label_used_as_title(self):
+        """「回顾: 课程标题」——标签含源关键字但值是标题，不能写进 source。
+
+        用户日志里出现过「文件不存在: 回顾: 3、xxx」：旧逻辑把
+        _KW_SOURCE 标签的值无条件当 source，覆盖了后面的真链接。
+        """
+        text = ("回顾: 3、langgraph-数据隔离&状态合并\n"
+                "日期: 2026-11-05 15:56:43\n"
+                f"回顾文件：{self.URL}\n"
+                "密码：6FTY")
+        self.assertEqual(parse_run_lines(text), [{
+            "source": self.URL, "password": "6FTY",
+            "title": "3、langgraph-数据隔离&状态合并"}])
+
+    def test_source_label_with_non_path_still_title(self):
+        """「文件: 某课」这类写法按标题处理；「文件: D:\\...\\x.srt」仍是源。"""
+        text = (f"回顾: 某课\n回放地址：{self.URL}\n密码：ABCD")
+        self.assertEqual(parse_run_lines(text), [{
+            "source": self.URL, "password": "ABCD", "title": "某课"}])
+        text2 = "文件: D:\\课程\\lecture.srt\n课程: 本地课"
+        self.assertEqual(parse_run_lines(text2), [{
+            "source": "D:\\课程\\lecture.srt", "password": "", "title": "本地课"}])
+
+    def test_two_review_blocks(self):
+        text = ("回顾: 3、langgraph-数据隔离\n"
+                f"回顾文件：{self.URL}\n密码：AAAA\n\n"
+                "回顾: 4、langgraph-状态合并\n"
+                "回顾文件：https://meeting.tencent.com/crm/OTHER\n密码：BBBB")
+        self.assertEqual(parse_run_lines(text), [
+            {"source": self.URL, "password": "AAAA", "title": "3、langgraph-数据隔离"},
+            {"source": "https://meeting.tencent.com/crm/OTHER",
+             "password": "BBBB", "title": "4、langgraph-状态合并"}])
+
     def test_arbitrary_chinese_labels(self):
         """完全没见过的标签也能按值的内容识别。"""
         text = ("课程名称：Vue3 组件通信\n"
