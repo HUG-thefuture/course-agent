@@ -174,6 +174,87 @@ class TestParseRunLines(unittest.TestCase):
         self.assertEqual(items, [{"source": self.URL, "password": "QSZI", "title": ""}])
 
 
+class TestUniversalLabelParsing(unittest.TestCase):
+    """普适性回归：标签名不能写死，应按「标签：值」结构 + 值的内容判断字段。
+
+    真实案例（用户粘贴，2026-11-06）：
+        3、langgraph-数据隔离&状态合并
+        日期: 2026-11-05 15:56:43
+        回顾文件：https://meeting.tencent.com/crm/2qr1V8ym08
+        密码：6FTY
+    旧解析器硬编码了「录制文件/文件/链接」等标签，「回顾文件」不在白名单，
+    结果把整条拆成 2 条错误待办。
+    """
+
+    URL = "https://meeting.tencent.com/crm/2qr1V8ym08"
+
+    def test_reported_case_review_file_label(self):
+        text = ("3、langgraph-数据隔离&状态合并\n"
+                "日期: 2026-11-05 15:56:43\n"
+                f"回顾文件：{self.URL}\n"
+                "密码：6FTY")
+        self.assertEqual(parse_run_lines(text), [{
+            "source": self.URL, "password": "6FTY",
+            "title": "3、langgraph-数据隔离&状态合并"}])
+
+    def test_arbitrary_chinese_labels(self):
+        """完全没见过的标签也能按值的内容识别。"""
+        text = ("课程名称：Vue3 组件通信\n"
+                f"回放地址：{self.URL}\n"
+                "访问码：ABCD\n"
+                "生成时间：2026-11-05")
+        self.assertEqual(parse_run_lines(text), [{
+            "source": self.URL, "password": "ABCD", "title": "Vue3 组件通信"}])
+
+    def test_english_labels(self):
+        text = f"Title: My Course\nURL: {self.URL}\nPassword: X1Y2"
+        self.assertEqual(parse_run_lines(text), [{
+            "source": self.URL, "password": "X1Y2", "title": "My Course"}])
+
+    def test_label_order_irrelevant(self):
+        """提取码/链接在前、编号标题在后：不能因标题以 N、开头就另起一条。"""
+        text = (f"提取码：6FTY\n链接：{self.URL}\n"
+                "录制: 5、langgraph-状态管理\n日期: 2026-11-05")
+        self.assertEqual(parse_run_lines(text), [{
+            "source": self.URL, "password": "6FTY",
+            "title": "5、langgraph-状态管理"}])
+
+    def test_two_numbered_blocks_without_blank_line(self):
+        text = ("1、课程甲\n链接：https://meeting.tencent.com/crm/AAAA\n密码：AAAA\n"
+                "2、课程乙\n链接：https://meeting.tencent.com/crm/BBBB\n密码：BBBB")
+        items = parse_run_lines(text)
+        self.assertEqual(len(items), 2)
+        self.assertEqual([i["title"] for i in items], ["1、课程甲", "2、课程乙"])
+
+    def test_url_colon_not_treated_as_label(self):
+        """`链接: https://...` 里 URL 的协议冒号不能被当成标签分隔符。"""
+        self.assertEqual(parse_run_lines(f"链接: {self.URL}"),
+                         [{"source": self.URL, "password": "", "title": ""}])
+
+    def test_title_containing_colon(self):
+        """标题里含冒号时，只按第一个冒号拆标签，剩余部分仍是标题。"""
+        text = f"课程: Spring Boot: 事务与并发\n链接: {self.URL}\n密码: ABCD"
+        self.assertEqual(parse_run_lines(text), [{
+            "source": self.URL, "password": "ABCD",
+            "title": "Spring Boot: 事务与并发"}])
+
+    def test_local_file_path_as_source(self):
+        text = "课程: 本地课\n素材文件: D:\\课程\\lecture.srt"
+        self.assertEqual(parse_run_lines(text), [{
+            "source": "D:\\课程\\lecture.srt", "password": "", "title": "本地课"}])
+
+    def test_unknown_label_with_date_value_ignored(self):
+        """未知标签 + 日期值：按值判为日期而忽略，不污染标题。"""
+        text = f"任意字段: 2026-11-05 15:56\n回顾: {self.URL}\n验证码: 6FTY"
+        self.assertEqual(parse_run_lines(text), [{
+            "source": self.URL, "password": "6FTY", "title": ""}])
+
+    def test_fullwidth_colon_labels(self):
+        text = f"标题：某课程\n回放文件：{self.URL}\n密码：ABC1"
+        self.assertEqual(parse_run_lines(text), [{
+            "source": self.URL, "password": "ABC1", "title": "某课程"}])
+
+
 class TestGradeObjective(unittest.TestCase):
     def test_single_choice(self):
         ex = {"type": "single_choice", "answer": "B"}

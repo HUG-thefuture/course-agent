@@ -172,28 +172,69 @@ _PROGRESS_LOCK = threading.Lock()  # 进度文件读改写互斥（多线程 HTT
 
 
 def parse_run_lines(text: str) -> list[dict]:
-    """把多行输入解析为待处理项，支持两种格式混排：
+    """把多行输入解析为待处理项，支持任意标签与多种格式混排。
 
-    1) 单行：`链接 [提取码] [标题]` 或 `链接|提取码|标题`（与 batch 清单同构）。
-    2) 标签块（会议纪要式粘贴，空行/新"录制"行分隔，字段顺序无关）::
+    设计原则：不穷举标签名，而是**按「标签：值」的结构 + 值的内容**判断字段类型。
+    这样用户从腾讯会议/其它平台复制出的表格，哪怕标签写成「回顾文件」「回放地址」
+    「访问码」之类没见过的词，也能正确识别。
 
-           录制: 27、langchain-向量存储Milvus概述
-           日期: 2026-10-26 16:31:23
-           录制文件：https://meeting.tencent.com/crm/24rZ6ekgbe
-           密码：YFDT
+    1) 单行：`链接 [提取码] [标题]` 或 `链接|提取码|标题`。
+    2) 标签块：任意 `标签：值`，字段顺序无关，例如::
 
-       标签可用中英文冒号；"录制/课程/标题"取标题，"录制文件/文件/链接"取源，
-       "密码/提取码"取码；日期行忽略。"N、"开头的录制行表示新一条课程。
+            3、langgraph-数据隔离&状态合并
+            日期: 2026-11-05 15:56:43
+            回顾文件：https://meeting.tencent.com/crm/2qr1V8ym08
+            密码：6FTY
 
-    腾讯会议回放链接会自动提取逐字稿；# 开头为注释行，空行忽略。
-    链接后紧跟的 3-8 位字母数字视作提取码，其剩余部分作标题。
+       值含 URL/文件路径 → 源；值形如 3-8 位字母数字或标签含「密码/提取码」→ 提取码；
+       值形如日期时间或标签含「日期/时间」→ 忽略；其余 → 标题。
+    3) 无标签三行式：标题 / 链接 / 提取码 各占一行。
+    4) 链接里内嵌提取码（/crm/短码/提取码/标题）由下游自动识别。
+
+    # 开头为注释行，空行忽略。
     """
-    _LABEL = re.compile(r"^(录制文件|录播文件|文件|链接|密码|提取码|录制|录播|课程|标题|日期|时间)"
-                        r"\s*[：:]\s*(.*)$")
-    _TITLE_KEYS = {"录制", "录播", "课程", "标题"}
-    _SRC_KEYS = {"录制文件", "录播文件", "文件", "链接"}
-    _PW_KEYS = {"密码", "提取码"}
-    _IGNORE_KEYS = {"日期", "时间"}
+    # 值里出现 URL 或已知素材文件 → 一定是「源」
+    _URL_OR_FILE = re.compile(
+        r"https?://\S+|[^\s|]+\.(?:mp4|mkv|mov|avi|webm|mp3|m4a|srt|vtt|json|txt|md|pdf)\b",
+        re.I)
+    _DATE = re.compile(r"\d{2,4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}:\d{2}(?::\d{2})?")
+    # 标签名关键字（仅作辅助提示，值的内容优先）
+    _KW_PASSWORD = ("密码", "提取码", "口令", "密钥", "访问码", "code", "password", "pwd", "secret")
+    _KW_IGNORE = ("日期", "时间", "date", "创建", "更新", "生成")
+    _KW_SOURCE = ("文件", "链接", "地址", "url", "回顾", "回放", "视频", "素材", "source", "link")
+    _KW_TITLE = ("标题", "课程", "名称", "主题", "录制", "录播", "title", "name", "subject")
+
+    def split_label(line: str):
+        """拆出「标签：值」。返回 (标签, 值)；不是标签行返回 None。
+
+        关键：不能把 `https://...` 的协议冒号当成标签分隔符——
+        若冒号后紧跟 `//`，或标签里含路径分隔符，就判定为 URL/路径而非标签。
+        """
+        m = re.match(r"^([^：:]+)\s*[：:]\s*(.*)$", line)
+        if not m:
+            return None
+        label, val = m.group(1).strip(), m.group(2).strip()
+        if not label or len(label) > 16:
+            return None
+        if "/" in label or "\\" in label or val.startswith("//"):
+            return None
+        return label, val
+
+    def classify_field(label: str, val: str) -> str:
+        """按值的内容为主、标签名为辅，判定字段类型。"""
+        low = label.lower()
+        if _URL_OR_FILE.search(val):
+            return "source"
+        if any(k in low for k in _KW_PASSWORD):
+            return "password"
+        if any(k in low for k in _KW_IGNORE) or _DATE.search(val):
+            return "ignore"
+        if (re.fullmatch(r"[A-Za-z0-9]{3,8}", val)
+                and not any(k in low for k in _KW_TITLE)):
+            return "password"
+        if any(k in low for k in _KW_SOURCE):
+            return "source"
+        return "title"
 
     items: list[dict] = []
     block: dict | None = None       # 当前标签块 {source, password, title}
@@ -242,8 +283,8 @@ def parse_run_lines(text: str) -> list[dict]:
         if not line or line.startswith("#"):
             flush()                               # 空行/注释结束一个块
             continue
-        lm = _LABEL.match(line)
-        if lm is None:                            # 裸行
+        pair = split_label(line)
+        if pair is None:                          # 裸行
             flush()
             # 纯提取码行（如链接下面单独一行 "ABCD"）：认领给上一条链接。
             # 用户常把「标题 / 链接 / 提取码」各写一行，也要能认出来。
@@ -268,22 +309,27 @@ def parse_run_lines(text: str) -> list[dict]:
             items.append(item)
             last_url_item = item if re.match(r"^https?://", item["source"]) else None
             continue
-        key, val = lm.group(1), lm.group(2).strip()
-        if key in _TITLE_KEYS and re.match(r"^\d{1,3}[、.．-]", val):
-            flush()                               # "27、xxx" = 新一条课程
+        label, val = pair
+        kind = classify_field(label, val)
+        # 新一条课程的判定：编号开头的标题，且当前块**已经有标题**。
+        # 只用「已有源/密码」会误伤「提取码/链接在前、标题在后」的块——
+        # 那种情况下这个编号标题正是当前块的标题，不该另起一条。
+        if (kind == "title" and re.match(r"^\d{1,3}[、.．-]", val)
+                and block and block["title"]):
+            flush()
         if block is None:
             block = {"source": "", "password": "", "title": ""}
             if pending_title:                     # 裸标题 + 本块 → 合成一个完整条目
                 block["title"] = pending_title
                 pending_title = ""
         last_url_item = None
-        if key in _IGNORE_KEYS:
+        if kind == "ignore" or not val:
             continue
-        if key in _SRC_KEYS and val:
+        if kind == "source":
             block["source"] = block["source"] or val
-        elif key in _PW_KEYS and val:
+        elif kind == "password":
             block["password"] = block["password"] or val
-        elif key in _TITLE_KEYS and val:
+        else:
             block["title"] = block["title"] or val
     flush()
     flush_title()
@@ -1117,7 +1163,7 @@ pre{white-space:pre-wrap;word-break:break-word;background:#111827;padding:14px;b
 <section id="view-run" class="hide"><div class="card"><h3>➕ 新课程整理任务</h3>
 <label>素材（一行一个链接，或直接粘贴会议纪要块）。腾讯会议回放自动提取 AI 逐字稿</label>
 <textarea id="r-in" rows="6" placeholder="https://meeting.tencent.com/crm/xxxx&#10;https://meeting.tencent.com/crm/yyyy 提取码 课程标题&#10;录制: 27、langchain-向量存储Milvus概述&#10;日期: 2026-10-26 16:31:23&#10;录制文件：https://meeting.tencent.com/crm/zzzz&#10;密码：ABCD"></textarea>
-<p class="dim">支持四种写法，可混排、可批量：① 单行 <code>链接 [提取码] [标题]</code> 或 <code>链接|提取码|标题</code>（# 开头为注释）；② 会议纪要块（<code>录制:</code> 标题、<code>录制文件：</code>链接、<code>密码：</code>提取码，日期行自动忽略）；③ 三行式 <code>标题</code> / <code>链接</code> / <code>提取码</code> 各占一行；④ 直接粘贴腾讯会议复制的链接——<code>/crm/短码/提取码/标题</code> 这种把提取码带在路径里的形式会被自动识别，无需再填。</p>
+<p class="dim">支持任意「标签：值」块，<b>标签名不限</b>（<code>回顾文件</code>/<code>回放地址</code>/<code>访问码</code>/英文标签都能识别，按内容自动判断是链接、提取码、日期还是标题）。也可混排：① 单行 <code>链接 [提取码] [标题]</code> 或 <code>链接|提取码|标题</code>（# 开头为注释）；② 三行式 <code>标题</code> / <code>链接</code> / <code>提取码</code> 各占一行；③ 直接粘贴腾讯会议链接——<code>/crm/短码/提取码/标题</code> 这种把提取码带在路径里的形式会自动识别，无需再填。日期行自动忽略，支持批量。</p>
 <div class="row"><div><label>提取码（单行时使用）</label><input id="r-pw" placeholder="无则留空"></div>
 <div><label>课程标题（单行时使用）</label><input id="r-ti" placeholder="默认自动命名"></div></div>
 <button class="pri" onclick="startRun()">开始整理</button>
