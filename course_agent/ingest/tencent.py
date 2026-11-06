@@ -158,13 +158,130 @@ def share_uuid(share_url: str) -> str:
     return m.group(0)
 
 
-def record_info(share: str, pwd: str) -> tuple[str, float]:
-    """share UUID + 提取码 -> (recording_id, 时长分钟)。
+def parse_share_page(short_code: str) -> dict:
+    """从分享页 HTML 的 serverData 里取出录制元信息（不依赖任何易变接口）。
 
-    接口对「提取码错误」和「未提供提取码」一律返回空 base_infos（code 仍为 0），
-    因此拿不到录制时按有没有传提取码给出不同提示：没传就提示去填提取码，
-    传了就说明提取码不对或分享已失效——这样用户不会对着同一句话反复重试。
+    2026-11 实测：`get-multi-record-info` 接口开始要求更多必需参数
+    （报 code=2710501「缺少必要参数」），即使传 pk_meeting_info_id /
+    sharing_id 也拿不到 base_infos。但**分享页本身**的 Next.js serverData
+    里数据完整：recordings[].id 就是 recording_id，minutes_status=1 表示
+    有 AI 逐字稿，subject 是课程名（base64）。因此改为直接解析页面。
+
+    关键实现细节：serverData 整块是嵌在 RSC 字符串里的**转义 JSON**
+    （所有引号是 `\\"`）。必须先定位 `serverData\"` 之后的第一个 `{\\"`，
+    还原转义后再做括号配对——直接在转义文本上配对会被 `\\"` 干扰，
+    导致提前截断（出现 "Extra data" 解析错误）。
+
+    返回 {"recording_id", "duration_min", "subject", "minutes_status",
+          "sharing_state", "pwd", "encode_uni_record_id", "code",
+          "recordings"}；页面没有 serverData 时返回 {}。
     """
+    html = _http_get(f"https://meeting.tencent.com/cw/{short_code}")
+
+    key = html.find('serverData\\"')
+    if key < 0:
+        key = html.find("serverData")
+    if key < 0:
+        return {}
+    # 从 serverData 往后找转义对象的起点 `{\"`（也可能已是裸 `{"`）
+    start = html.find('{\\"', key)
+    if start < 0:
+        start = html.find("{", key)
+    if start < 0:
+        return {}
+    # 只取 serverData 之后的一段（RSC payload 里紧跟其后；留足长度上限）
+    chunk = html[start:start + 40000]
+    # 先还原 RSC 转义，得到干净的 JSON 文本
+    chunk = (chunk.replace('\\"', '"').replace("\\u0026", "&")
+             .replace("\\u0027", "'").replace("\\u003c", "<")
+             .replace("\\u003e", ">").replace("\\/", "/"))
+    # 再做括号配对，取第一个完整对象
+    depth = 0
+    in_str = False
+    esc = False
+    end = -1
+    for i, ch in enumerate(chunk):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+    if end < 0:
+        return {}
+    try:
+        data = json.loads(chunk[:end])
+    except json.JSONDecodeError:
+        return {}
+
+    recs = data.get("recordings") or []
+    rec = recs[0] if recs else {}
+    subject = (data.get("meeting_info") or {}).get("subject") or data.get("subject") or ""
+    if subject:
+        try:  # 课程名是 base64（可能补 padding 才能解）
+            import base64
+            subject = base64.b64decode(
+                subject + "=" * (-len(subject) % 4)).decode("utf-8")
+        except Exception:
+            pass
+    duration_ms = 0
+    try:
+        duration_ms = int(rec.get("duration") or data.get("recording_duration") or 0)
+    except (TypeError, ValueError):
+        duration_ms = 0
+    return {
+        "recording_id": rec.get("id") or "",
+        "duration_min": duration_ms / 60000.0,
+        "subject": subject,
+        "minutes_status": rec.get("minutes_status"),
+        "sharing_state": data.get("sharing_state"),
+        "pwd": data.get("pwd") or "",
+        "encode_uni_record_id": data.get("encode_uni_record_id") or "",
+        "code": data.get("code"),
+        "recordings": len(recs),
+    }
+
+
+def record_info(share: str, pwd: str, short_code: str = "") -> tuple[str, float]:
+    """分享页 + 提取码 -> (recording_id, 时长分钟)。
+
+    优先用分享页 serverData（稳定、不依赖易变接口）；取不到再退回旧接口。
+    接口/页面在「提取码错误」与「未提供提取码」时表现相同，因此拿不到
+    录制时按有没有传提取码给出不同提示，避免用户对着同一句话反复重试。
+    """
+    page: dict = {}
+    if short_code:
+        try:
+            page = parse_share_page(short_code)
+        except (OSError, ValueError):
+            page = {}
+
+    if page:
+        # 页面明确显示需要提取码却没给 / 给了码但页面 pwd 不匹配
+        page_pwd = page.get("pwd") or ""
+        if page_pwd and not pwd:
+            raise ValueError(
+                "该分享需要提取码。请在「提取码」栏填写后重试")
+        if page_pwd and pwd and pwd.strip().upper() != page_pwd.strip().upper():
+            raise ValueError("提取码不正确（请核对分享页上的提取码）")
+        rid = page.get("recording_id") or ""
+        if rid:
+            return rid, float(page.get("duration_min") or 0)
+        if page.get("recordings") == 0:
+            raise ValueError("该分享下没有录制文件（可能已被取消分享）")
+
+    # 退回旧接口（部分老分享仍需走这里）
     ts = int(time.time() * 1000)
     body = _http_get(
         "https://meeting.tencent.com/wemeet-tapi/v2/meetlog/public/record-detail/"
@@ -214,15 +331,28 @@ def harvest_minutes(share_url: str, password: str = "") -> tuple[list[dict], dic
 
     新版记录只有 split_version=1，2026-08 底前的部分记录只有 0——两者都试。
     提取码来源优先级：显式传入 > 链接路径里内嵌的（/crm/<短码>/<码>/<标题>）。
+    录制 id 优先从分享页 serverData 取（2026-11 起旧接口要求更多必填参数，
+    已不可靠）；minutes 接口的 id 参数用页面里的 encode_uni_record_id。
     """
     pwd = (password or "").strip() or embedded_password(share_url)
-    share = share_uuid(share_url)
-    recording_id, duration_min = record_info(share, pwd)
+    short = _short_code(share_url)
+
+    # 页面元信息（拿 recording_id / encode_uni_record_id / 课程名）
+    page: dict = {}
+    try:
+        page = parse_share_page(short) if short else {}
+    except (OSError, ValueError):
+        page = {}
+
+    recording_id, duration_min = record_info(
+        share_uuid(share_url), pwd, short_code=short)
+    minutes_id = page.get("encode_uni_record_id") or share_uuid(share_url)
+
     data: dict = {}
     rows: list[dict] = []
     err = ""
     for sv in (1, 0):
-        data = minutes_detail(share, pwd, recording_id, split_version=sv)
+        data = minutes_detail(minutes_id, pwd, recording_id, split_version=sv)
         rows = minutes_rows(data)
         if data.get("code") == 0 and rows:
             break
@@ -230,9 +360,12 @@ def harvest_minutes(share_url: str, password: str = "") -> tuple[list[dict], dic
     if not rows:
         if "无录制文件" in str(err) or data.get("code") != 0:
             raise ValueError(err or "无逐字稿数据")
-        raise ValueError("该录制没有 AI 逐字稿（可能未生成或录制过短）")
+        raise ValueError(
+            "该录制没有 AI 逐字稿（minutes_status="
+            f"{page.get('minutes_status')}，可能未生成或录制过短）")
     meta = {"recording_id": recording_id, "duration_min": round(duration_min, 1),
-            "source": share_url, "used_password": bool(pwd)}
+            "source": share_url, "used_password": bool(pwd),
+            "subject": page.get("subject") or ""}
     return rows, meta
 
 

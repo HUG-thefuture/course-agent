@@ -8,7 +8,8 @@ from course_agent.ingest.loader import classify_url
 from course_agent.ingest.tencent import (add_access_code, embedded_password,
                                          guided_steps, harvest_minutes,
                                          is_tencent_share, minutes_rows,
-                                         try_extract_video_url, _short_code)
+                                         try_extract_video_url, _short_code,
+                                         parse_share_page, record_info)
 
 SHARE = ("https://meeting.tencent.com/v2/cloud-record/share.html"
          "?record_id=abc123&access_code=8888")
@@ -133,6 +134,106 @@ class TestExtract(unittest.TestCase):
         self.assertIn("mp4", text)
         self.assertIn("允许下载", text)
         self.assertIn(SHARE, text)
+
+
+class TestSharePageParsing(unittest.TestCase):
+    """分享页 serverData 解析（2026-11 起旧接口不可靠，改为直接读页面）。"""
+
+    def _rsc_html(self, server_data: dict) -> str:
+        """构造 Next.js RSC 风格的转义 serverData 片段。"""
+        inner = json.dumps(server_data, ensure_ascii=False).replace('"', '\\"')
+        return ('<script>self.__next_f.push([1,"18:{\\"data\\":{\\"query\\":'
+                '{\\"serverData\\":' + inner + '},\\"foo\\":0}}]\\n")</script>')
+
+    def test_parse_real_escaped_shape(self):
+        """关键：转义 JSON 必须先还原引号再配对，否则会截断。"""
+        d = {"code": 4033, "sharing_state": "1", "pwd": "IB7A",
+             "encode_uni_record_id": "ENC123",
+             "meeting_info": {"subject": "MS/langgraph-5qaL"},
+             "recordings": [{"id": "2118151175657656321",
+                             "duration": 5713536, "minutes_status": 1}]}
+        import course_agent.ingest.tencent as t
+        orig = t._http_get
+        t._http_get = lambda *a, **k: self._rsc_html(d)
+        try:
+            got = parse_share_page("lvrdVLX420")
+        finally:
+            t._http_get = orig
+        self.assertEqual(got.get("recording_id"), "2118151175657656321")
+        self.assertEqual(got.get("pwd"), "IB7A")
+        self.assertEqual(got.get("encode_uni_record_id"), "ENC123")
+        self.assertEqual(got.get("minutes_status"), 1)
+        self.assertAlmostEqual(got.get("duration_min"), 95.2256, places=2)
+        self.assertEqual(got.get("recordings"), 1)
+
+    def test_base64_subject_decoded(self):
+        import base64
+        import course_agent.ingest.tencent as t
+        name = base64.b64encode("1、langgraph-概述".encode()).decode().rstrip("=")
+        d = {"meeting_info": {"subject": name},
+             "recordings": [{"id": "R1", "duration": 60000}]}
+        orig = t._http_get
+        t._http_get = lambda *a, **k: self._rsc_html(d)
+        try:
+            got = parse_share_page("x")
+        finally:
+            t._http_get = orig
+        self.assertEqual(got.get("subject"), "1、langgraph-概述")
+
+    def test_no_serverdata_returns_empty(self):
+        import course_agent.ingest.tencent as t
+        orig = t._http_get
+        t._http_get = lambda *a, **k: "<html>普通页面</html>"
+        try:
+            self.assertEqual(parse_share_page("x"), {})
+        finally:
+            t._http_get = orig
+
+    def test_record_info_uses_page_without_legacy_api(self):
+        """页面有 recording_id 时不应再调用 get-multi-record-info。"""
+        import course_agent.ingest.tencent as t
+        d = {"pwd": "IB7A", "recordings": [{"id": "RPAGE", "duration": 3000000}]}
+        calls = []
+
+        def fake(url, **kw):
+            calls.append(url)
+            if "/cw/" in url:
+                return self._rsc_html(d)
+            raise AssertionError("不应再调用旧接口: " + url[:60])
+
+        orig = t._http_get
+        t._http_get = fake
+        try:
+            rid, minutes = record_info("uuid", "IB7A", short_code="lvrdVLX420")
+        finally:
+            t._http_get = orig
+        self.assertEqual(rid, "RPAGE")
+        self.assertEqual(minutes, 50.0)
+        self.assertFalse(any("get-multi-record-info" in c for c in calls))
+
+    def test_record_info_rejects_wrong_password_from_page(self):
+        import course_agent.ingest.tencent as t
+        d = {"pwd": "IB7A", "recordings": [{"id": "R1", "duration": 60000}]}
+        orig = t._http_get
+        t._http_get = lambda *a, **k: self._rsc_html(d)
+        try:
+            with self.assertRaises(ValueError) as cm:
+                record_info("uuid", "WRONG", short_code="lvrdVLX420")
+        finally:
+            t._http_get = orig
+        self.assertIn("提取码不正确", str(cm.exception))
+
+    def test_record_info_requires_password_when_page_has_one(self):
+        import course_agent.ingest.tencent as t
+        d = {"pwd": "IB7A", "recordings": [{"id": "R1", "duration": 60000}]}
+        orig = t._http_get
+        t._http_get = lambda *a, **k: self._rsc_html(d)
+        try:
+            with self.assertRaises(ValueError) as cm:
+                record_info("uuid", "", short_code="lvrdVLX420")
+        finally:
+            t._http_get = orig
+        self.assertIn("需要提取码", str(cm.exception))
 
 
 class TestHarvestMinutes(unittest.TestCase):
