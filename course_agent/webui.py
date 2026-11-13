@@ -732,12 +732,34 @@ def _progress_path(cfg: AgentConfig, cid: str) -> Path:
 
 
 def _load_progress(cfg: AgentConfig, cid: str) -> dict:
+    """读进度文件。损坏时不能静默返回 {}——否则下一次写入会把用户全部作答覆盖成空。
+
+    策略：先按 utf-8 读；失败再按 utf-8-sig / gbk 兜底（历史文件有编码混杂）。
+    仍解析不了就把坏文件改名备份（.bad-时间戳），返回 {}，保证后续写入能正常进行
+    且坏数据有据可查。
+    """
     p = _progress_path(cfg, cid)
-    if p.is_file():
+    if not p.is_file():
+        return {}
+    raw = None
+    for enc in ("utf-8", "utf-8-sig", "gbk"):
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {}
+            raw = p.read_text(encoding=enc)
+            break
+        except (UnicodeDecodeError, OSError):
+            continue
+    if raw is not None:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
+    # 损坏：备份后从空开始，避免反复失败或整份覆盖且无从追溯
+    try:
+        p.replace(p.with_name(p.name + time.strftime(".bad-%Y%m%d%H%M%S")))
+    except OSError:
+        pass
     return {}
 
 
@@ -747,6 +769,51 @@ def _save_progress(cfg: AgentConfig, cid: str, data: dict) -> None:
     tmp = p.with_suffix(".tmp")  # 原子替换：写一半被读不会得到空进度
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(p)
+
+
+def _merge_progress(data: dict, inc: dict) -> dict:
+    """把增量进度并入已有进度（就地修改并返回 data）。
+
+    为什么必须深合并：前端在「输入暂停」「切章」时只提交本章的作答文本
+    （`{"sections": {"0": {"2": {"user": "..."}}}}`），不带判分结果。
+    旧实现只做到章节级 `data["sections"].update(v)`，于是这道只带 user 的
+    增量会把该章已存的 score/correct 整个覆盖掉——现象就是交卷看过分数，
+    切一章再回来分数全没了。
+    所以这里按「章节 → 题号 → 字段」三层合并：同名字段覆盖，未提交字段保留。
+    """
+    if not isinstance(inc, dict):
+        return data
+    for k, v in inc.items():
+        if k == "sections" and isinstance(v, dict):
+            secs = data.get("sections")
+            if not isinstance(secs, dict):
+                secs = {}
+                data["sections"] = secs
+            for sec_key, sec_val in v.items():
+                if not isinstance(sec_val, dict):
+                    secs[sec_key] = sec_val
+                    continue
+                cur = secs.get(sec_key)
+                if not isinstance(cur, dict):
+                    cur = {}
+                    secs[sec_key] = cur
+                for q_key, q_val in sec_val.items():
+                    if isinstance(q_val, dict) and isinstance(cur.get(q_key), dict):
+                        cur[q_key].update(q_val)   # 逐题字段合并，保留 score/correct
+                    else:
+                        cur[q_key] = q_val
+        elif k in ("summaries", "reviews") and isinstance(v, dict):
+            # 汇总/解析也按章节键合并，避免只更新一章时冲掉其它章
+            cur = data.get(k)
+            if not isinstance(cur, dict):
+                cur = {}
+                data[k] = cur
+            cur.update(v)
+        elif k == "sections" and not isinstance(v, dict):
+            continue  # 脏数据丢弃，绝不覆盖
+        else:
+            data[k] = v
+    return data
 
 
 # ------------------------------------------------------------------ HTTP
@@ -843,13 +910,17 @@ class Handler(BaseHTTPRequestHandler):
                     if (d / "notes.md").is_file() else ""
                 review = (d / "review.md").read_text(encoding="utf-8") \
                     if (d / "review.md").is_file() else ""
+                # 读进度与写进度分属不同线程：加锁避免读到 .tmp 替换瞬间的半状态
+                with _PROGRESS_LOCK:
+                    progress = _load_progress(self.cfg, _course_id(self.cfg, d))
                 return self._json({"id": _course_id(self.cfg, d), "session": session,
                                    "sections": sections, "notes": notes,
                                    "review": review, "report": report,
-                                   "progress": _load_progress(self.cfg, _course_id(self.cfg, d))})
+                                   "progress": progress})
             if u.path == "/api/progress":
                 cid = (q.get("course") or [""])[0]
-                return self._json(_load_progress(self.cfg, cid))
+                with _PROGRESS_LOCK:
+                    return self._json(_load_progress(self.cfg, cid))
             if u.path == "/api/run/status":
                 with _RUN_LOCK:
                     return self._json(dict(_RUN_STATE))
@@ -999,12 +1070,7 @@ class Handler(BaseHTTPRequestHandler):
                 inc = body.get("data") or {}
                 with _PROGRESS_LOCK:
                     data = _load_progress(self.cfg, cid)
-                    for k, v in inc.items():
-                        if k == "sections" and isinstance(v, dict) \
-                                and isinstance(data.get("sections"), dict):
-                            data["sections"].update(v)  # 深合并：只更新提交的章
-                        else:
-                            data[k] = v
+                    _merge_progress(data, inc)
                     _save_progress(self.cfg, cid, data)
                 return self._json({"ok": True})
             if u.path == "/api/run":
@@ -1073,10 +1139,22 @@ class Handler(BaseHTTPRequestHandler):
             prog = _load_progress(self.cfg, cid)
             sec_prog = prog.setdefault("sections", {}).setdefault(str(si), {})
             for r in results:
-                sec_prog[str(r["idx"])] = {"user": answers[r["idx"]] if r["idx"] < len(answers) else "",
-                                           "score": r["score"], "correct": r["correct"]}
+                prev = sec_prog.get(str(r["idx"]))
+                if not isinstance(prev, dict):
+                    prev = {}
+                row = {"user": answers[r["idx"]] if r["idx"] < len(answers) else "",
+                       "score": r["score"], "correct": r["correct"]}
+                for extra in ("note", "verdict", "feedback"):
+                    if r.get(extra):
+                        row[extra] = r[extra]
+                prev.update(row)  # 保留旧记录里的其它字段（如历史 best）
+                sec_prog[str(r["idx"])] = prev
             _save_progress(self.cfg, cid, prog)
         graded = [r for r in results if r["score"] is not None]
+        summary = {"graded": len(graded),
+                   "correct": sum(1 for r in graded if r["correct"]),
+                   "avg": round(sum(r["score"] for r in graded) / len(graded)) if graded else 0,
+                   "llm_error": llm_err}
 
         # 交卷后自动生成：逐题解析 + 薄弱点强化知识 + 复习建议（追加到 强化复习.md）
         review = None
@@ -1110,12 +1188,24 @@ class Handler(BaseHTTPRequestHandler):
         except (LLMError, ValueError) as e:
             review = {"error": truncate(str(e), 160)}
 
-        return {"results": results,
-                "summary": {"graded": len(graded),
-                            "correct": sum(1 for r in graded if r["correct"]),
-                            "avg": round(sum(r["score"] for r in graded) / len(graded)) if graded else 0,
-                            "llm_error": llm_err},
-                "review": review}
+        # 判分汇总/解析也落盘：再进课程时无需重交卷即可看到上次成绩与解析
+        with _PROGRESS_LOCK:
+            prog2 = _load_progress(self.cfg, cid)
+            sums = prog2.get("summaries")
+            if not isinstance(sums, dict):
+                sums = {}
+                prog2["summaries"] = sums
+            sums[str(si)] = summary
+            if review and review.get("overall"):
+                revs = prog2.get("reviews")
+                if not isinstance(revs, dict):
+                    revs = {}
+                    prog2["reviews"] = revs
+                revs[str(si)] = review
+            prog2["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            _save_progress(self.cfg, cid, prog2)
+
+        return {"results": results, "summary": summary, "review": review}
 
 
 # ------------------------------------------------------------------ 页面
@@ -1182,7 +1272,10 @@ let COURSE=null,DATA=null;
 function h(s){return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;")}
 const BSQ=String.fromCharCode(92);
 function js(s){return (s||"").split(BSQ).join(BSQ+BSQ).split("'").join(BSQ+"'").split('"').join("&quot;")}
-function show(t){["courses","course","groups","groupdetail","run"].forEach(x=>{$("#nav-"+({course:"courses",groupdetail:"groups"}[x]||x))?.classList.toggle("on",(x==="courses"&&(t==="courses"||t==="course"))||(x==="groups"&&(t==="groups"||t==="groupdetail")));$("#view-"+x).classList.toggle("hide",x!==t)});if(t==="courses")loadCourses();if(t==="groups")loadGroups()}
+function show(t){
+  // 离开答题页（返回列表/切到课程组等）先把当前章作答落盘：不依赖用户点「下一章」
+  if(t!=="course"&&COURSE&&DATA&&DATA.sections){try{flushQuiz()}catch(e){}}
+  ["courses","course","groups","groupdetail","run"].forEach(x=>{$("#nav-"+({course:"courses",groupdetail:"groups"}[x]||x))?.classList.toggle("on",(x==="courses"&&(t==="courses"||t==="course"))||(x==="groups"&&(t==="groups"||t==="groupdetail")));$("#view-"+x).classList.toggle("hide",x!==t)});if(t==="courses")loadCourses();if(t==="groups")loadGroups()}
 async function api(u,opt){const r=await fetch(u,opt);return r.json()}
 
 async function loadGroups(){
@@ -1212,6 +1305,7 @@ async function loadCourses(){
    `</table>`;
 }
 async function openCourse(id){
+  if(COURSE&&COURSE!==id){try{await flushQuiz()}catch(e){}}  // 切课前先保存上一门
   DATA=await api("/api/course?id="+encodeURIComponent(id));COURSE=id;
   const s=DATA.session,secs=DATA.sections||[];
   $("#course-body").innerHTML=`
@@ -1227,6 +1321,94 @@ async function openCourse(id){
   show("course");renderQuiz(0);
 }
 let QIDX=0;
+// ---- 作答暂存（自动缓存） ----
+// 设计：任何作答变化都 debounce 后提交本章 {user}；服务端做深合并，
+// 所以只带 user 的增量不会冲掉已判分的 score/correct。
+let _SAVE_T=null,_SAVE_DIRTY=false,_SAVE_BUSY=false;
+function secProgress(si){
+  const p=DATA&&DATA.progress;if(!p)return{};
+  const s=(p.sections||{})[String(si)];return s&&typeof s==="object"?s:{};
+}
+function markDirty(){_SAVE_DIRTY=true;if(_SAVE_T)clearTimeout(_SAVE_T);_SAVE_T=setTimeout(()=>{flushQuiz()},1200)}
+async function flushQuiz(){
+  if(_SAVE_T){clearTimeout(_SAVE_T);_SAVE_T=null}
+  if(!COURSE||!DATA||!DATA.sections||QIDX==null)return;
+  if(!_SAVE_DIRTY||_SAVE_BUSY)return;
+  _SAVE_BUSY=true;
+  const si=QIDX;
+  try{
+    const rows=collect(si),sec={};
+    rows.forEach((a,i)=>{sec[i]={user:a}});
+    // 先本地落地，保证即使请求失败，同页切章也读得到
+    if(!DATA.progress)DATA.progress={};
+    DATA.progress.sections=DATA.progress.sections||{};
+    const local=DATA.progress.sections[String(si)]||(DATA.progress.sections[String(si)]={});
+    Object.keys(sec).forEach(k=>{local[k]=Object.assign({},local[k]||{},sec[k])});
+    _SAVE_DIRTY=false;
+    await api("/api/progress",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({course:COURSE,data:{sections:{[String(si)]:sec}}})});
+  }catch(e){_SAVE_DIRTY=true}finally{_SAVE_BUSY=false}
+}
+function bindAnswerWatchers(si,sec){
+  const on=()=>markDirty();
+  (sec.exercises||[]).forEach((e,i)=>{
+    const el=document.getElementById("a"+i);
+    if(el)el.addEventListener("input",on);
+  });
+  document.querySelectorAll('#quiz input[type=radio],#quiz input[type=checkbox]')
+    .forEach(x=>{x.addEventListener("change",on);x.addEventListener("click",on)});
+}
+function restoreAnswers(si,sec){
+  const sp=secProgress(si);
+  (sec.exercises||[]).forEach((e,i)=>{
+    const rec=sp[String(i)];
+    if(!rec)return;
+    const user=rec.user==null?"":String(rec.user);
+    if(!user)return;
+    if(e.options&&e.options.length||e.type==="true_false"){
+      const u=user.toUpperCase();
+      // 多选：逐字符；单选取第一个字符
+      document.querySelectorAll(`input[name=q${i}]`).forEach(inp=>{
+        inp.checked=u.indexOf(inp.value.toUpperCase())>=0;
+      });
+    }else{
+      const el=document.getElementById("a"+i);
+      if(el)el.value=user;
+    }
+  });
+  // 编程题行号跟随恢复后的内容
+  (sec.exercises||[]).forEach((e,i)=>{
+    if(e.type!=="coding_practice")return;
+    const t=document.getElementById("a"+i),g=document.getElementById("g"+i);
+    if(!t||!g)return;
+    const n=t.value.split("\\n").length;
+    g.textContent=Array.from({length:n},(_,k)=>k+1).join("\\n");
+  });
+}
+function renderReviewPanel(si){
+  const rv=document.getElementById("quiz-review");if(!rv){return}
+  const rev=((DATA.progress||{}).reviews||{})[String(si)];
+  const sum=((DATA.progress||{}).summaries||{})[String(si)];
+  if(sum)$("#quiz-sum").textContent=`本章判分：${sum.correct}/${sum.graded} 题正确，平均 ${sum.avg} 分`+(sum.llm_error?`（主观题异常：${sum.llm_error}）`:"")+"（上次交卷结果，已缓存）";
+  if(!rev){rv.innerHTML="";return}
+  if(rev.error){rv.innerHTML=`<div class="res mid">上次解析生成失败：${h(rev.error)}</div>`;return}
+  let rhtml=`<div class="card" style="margin-top:12px"><h3 style="margin-top:0">📝 上次测验解析与强化知识</h3>`;
+  if(rev.overall)rhtml+=`<div class="kp"><b>整体评价：</b>${h(rev.overall)}</div>`;
+  if(rev.items&&rev.items.length)rhtml+=`<details><summary>逐题解析</summary>`+rev.items.map(it=>`<div class="kp"><b>第 ${it.idx+1} 题</b>：${h(it.analysis)}</div>`).join("")+`</details>`;
+  if(rev.weak_points&&rev.weak_points.length)rhtml+=`<details><summary>📌 薄弱点强化知识</summary>`+rev.weak_points.map(w=>`<div class="kp"><b>${h(w.topic)}</b>：${h(w.content)}</div>`).join("")+`</details>`;
+  if(rev.suggestions&&rev.suggestions.length)rhtml+=`<details><summary>🧭 复习建议</summary>`+rev.suggestions.map(s=>`<div class="kp">· ${h(s)}</div>`).join("")+`</details>`;
+  rv.innerHTML=rhtml+"</div>";
+}
+function renderScores(si,sec){
+  const sp=secProgress(si);
+  (sec.exercises||[]).forEach((e,i)=>{
+    const rec=sp[String(i)];if(!rec||rec.score===null||rec.score===undefined)return;
+    const el=document.getElementById("r"+i);if(!el)return;
+    const cls=rec.correct?"ok":((rec.score>=60)?"mid":"bad");
+    let extra=rec.feedback?`<div class="dim">AI 点评：${h(rec.feedback)}</div>`:"";
+    el.innerHTML=`<div class="res ${cls}">${rec.correct?"✅":"❌"} ${rec.score} 分 ${h(rec.verdict||"")} ${rec.note?("· "+h(rec.note)):""}</div>${extra}`;
+  });
+}
 function renderQuiz(si){
   QIDX=si;const sec=(DATA.sections||[])[si];
   if(!sec){$("#quiz").innerHTML="（无此章）";$("#quiz-nav").innerHTML="";return}
@@ -1243,9 +1425,13 @@ function renderQuiz(si){
   $("#quiz-nav").innerHTML=`<button class="pri" onclick="submitQuiz(${si})">交卷判分</button>
    ${si>0?`<button class="mini" onclick="gotoQuiz(${si},${si-1})">◀ 上一章</button>`:""}
    ${si<DATA.sections.length-1?`<button class="mini" onclick="gotoQuiz(${si},${si+1})">下一章 ▶</button>`:""}
-   <span class="dim">第 ${si+1}/${DATA.sections.length} 章 · 切换时自动暂存本章作答</span>`;
+   <span class="dim">第 ${si+1}/${DATA.sections.length} 章 · 作答自动暂存</span>`;
   $("#quiz-sum").textContent="";
   DATA.sections[si].exercises.forEach((e,i)=>{if(e.type==="coding_practice")setupEditor(i)});
+  restoreAnswers(si,sec);   // 回填已缓存作答
+  renderScores(si,sec);     // 回显上次判分
+  renderReviewPanel(si);    // 回显上次解析
+  bindAnswerWatchers(si,sec);
 }
 function setupEditor(i){
   const t=document.getElementById("a"+i),g=document.getElementById("g"+i);
@@ -1257,12 +1443,17 @@ function setupEditor(i){
 }
 async function gotoQuiz(cur,n){
   if(n<0||!DATA.sections[n])return;
-  try{ // 静默暂存本章作答，切换不丢
+  try{ // 暂存本章作答，切换不丢
     const rows=collect(cur);const sec={};
     rows.forEach((a,i)=>{sec[i]={user:a}});
+    if(!DATA.progress)DATA.progress={};
+    DATA.progress.sections=DATA.progress.sections||{};
+    const local=DATA.progress.sections[String(cur)]||(DATA.progress.sections[String(cur)]={});
+    Object.keys(sec).forEach(k=>{local[k]=Object.assign({},local[k]||{},sec[k])});
     await api("/api/progress",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({course:COURSE,data:{sections:{[String(cur)]:sec}}})});
   }catch(e){}
+  _SAVE_DIRTY=false;
   renderQuiz(n);
 }
 function collect(si){
@@ -1300,6 +1491,23 @@ async function submitQuiz(si,move){
     } else if(d.review&&d.review.error){
       rv.innerHTML=`<div class="res mid">解析生成失败：${h(d.review.error)}（判分结果不受影响）</div>`;
     } else { rv.innerHTML=""; }
+  }
+  // 判分结果写回本地 progress：本次会话内切章/再进课程都能立刻回显（服务端也已落盘）
+  if(DATA){
+    DATA.progress=DATA.progress||{};
+    const sp=DATA.progress.sections=DATA.progress.sections||{};
+    const secp=sp[String(si)]||(sp[String(si)]={});
+    d.results.forEach(r=>{
+      secp[String(r.idx)]=Object.assign({},secp[String(r.idx)]||{},
+        {user:answers[r.idx]!==undefined?answers[r.idx]:"",score:r.score,correct:r.correct,
+         note:r.note,verdict:r.verdict,feedback:r.feedback});
+    });
+    DATA.progress.summaries=DATA.progress.summaries||{};
+    DATA.progress.summaries[String(si)]=d.summary;
+    if(d.review&&d.review.overall){
+      DATA.progress.reviews=DATA.progress.reviews||{};
+      DATA.progress.reviews[String(si)]=d.review;
+    }
   }
   if(move&&DATA.sections[si+1])renderQuiz(si+1);
 }
@@ -1351,6 +1559,18 @@ document.addEventListener("keydown",(ev)=>{
   t.value=t.value.slice(0,s)+"    "+t.value.slice(en);
   t.selectionStart=t.selectionEnd=s+4;
 });
+// 兜底：关页面/切标签页时把作答存掉（sendBeacon 在 unload 里才可靠）
+function beaconSave(){
+  if(!COURSE||!DATA||!DATA.sections||!document.getElementById("quiz"))return;
+  try{
+    const rows=collect(QIDX),sec={};
+    rows.forEach((a,i)=>{sec[i]={user:a}});
+    const payload=JSON.stringify({course:COURSE,data:{sections:{[String(QIDX)]:sec}}});
+    if(navigator.sendBeacon)navigator.sendBeacon("/api/progress",new Blob([payload],{type:"application/json"}));
+  }catch(e){}
+}
+window.addEventListener("beforeunload",beaconSave);
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="hidden"){try{beaconSave()}catch(e){}}});
 loadCourses();
 </script></body></html>
 """

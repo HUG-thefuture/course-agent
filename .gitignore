@@ -31,3 +31,6 @@ build/
 CourseAgent-*.zip
 # PyInstaller 自动生成的构建描述文件
 *.spec
+
+# Local test scratch dir (pytest artifacts under DSH sandbox)
+.tmp_tests/
