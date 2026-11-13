@@ -1,4 +1,4 @@
-﻿# CourseAgent —— 直播课程知识整理助手
+# CourseAgent —— 直播课程知识整理助手
 
 把直播课的**字幕 / 文稿 / 录音 / 网页**自动整理成：**知识点笔记、关键节点速查表、配套习题（含答案解析）**，全部产物经过"计划 → 审查 → 测试"质检闭环，帮助你课后快速掌握一门课。
 
@@ -15,20 +15,22 @@
 
 ### 方式 A：下载现成版本（推荐给不想装 Python 的人）
 
-**直接下载**：[CourseAgent v1.2](https://github.com/HUG-thefuture/course-agent/releases/latest)（Windows 10/11 64 位，无需装 Python）
+**直接下载**：[CourseAgent v1.2.1](https://github.com/HUG-thefuture/course-agent/releases/latest)（Windows 10/11 64 位，无需装 Python）
 
 两种版本按需选：
 
 | 版本 | 文件 | 适用 |
 |---|---|---|
-| **单文件版** | `CourseAgent-v1.2.0-win64.exe`（14.5 MB） | 想走**安装向导、自选装到哪** |
-| **目录版** | `CourseAgent-v1.2.0-portable.zip`（14.5 MB） | **解压即用**，不装任何东西 |
+| **单文件版** | `CourseAgent-v1.2.1-win64.exe`（15.2 MB） | 想走**安装向导、自选装到哪** |
+| **目录版** | `CourseAgent-v1.2.1-portable.zip`（15.5 MB） | **解压即用**，不装任何东西 |
+
+> v1.2.1 修复：做完复习题后返回课程页面作答/判分/AI 解析变空白（详见 [Release Notes](https://github.com/HUG-thefuture/course-agent/releases/tag/v1.2.1)）。
 
 **单文件版**（支持自选安装位置）：
 
 ```bat
-CourseAgent-v1.2.0-win64.exe --install      :: 弹安装向导，自选目录
-CourseAgent-v1.2.0-win64.exe --uninstall    :: 卸载（只删快捷方式，数据保留）
+CourseAgent-v1.2.1-win64.exe --install      :: 弹安装向导，自选目录
+CourseAgent-v1.2.1-win64.exe --uninstall    :: 卸载（只删快捷方式，数据保留）
 ```
 
 向导会问装到哪个目录（默认避开空间紧张的 C 盘）、是否建桌面/开始菜单快捷方式。
